@@ -101,6 +101,19 @@ camera fog rendering is currently buggy.
 `10.99.0.1` (slides) is a **different** sim instance's WireGuard subnet. **Ours is
 `10.99.1.1`** — that is where the track API (`:8010`) and everything else answers.
 
+### Sim health caveat (observed live)
+The sim's assets can get into a state where SITL is healthy but Gazebo does not
+apply its outputs: the quadcopter accepted `arm` and `NAV_TAKEOFF`
+(`MAV_RESULT_ACCEPTED`) but never left the ground, and `SERVO_OUTPUT_RAW` showed
+hover throttle while the model stayed put. A `POST /api/reset` (recreate sim +
+assets) and even `POST /api/rebuild` did **not** clear it. The fixed-wing and
+both towers were unaffected. If an asset is commanded correctly but does not
+move, treat it as a sim fault: Reset from the UI, and escalate to DD staff if it
+persists. `Fleet.on_reset()` / `SimClient.wait_until_ready()` handle the
+reconnect, but they cannot repair a broken physics backend.
+`/api/rebuild` also printed `WARNING: 5 assets share model 'skywalker_x8'; they
+cannot have separate FDM ports` — worth reporting to the organisers.
+
 ## 4. MAVLink endpoints, IDs and messages
 
 One ArduPilot instance per container, always instance 0, **stock in-container

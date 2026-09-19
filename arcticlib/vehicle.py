@@ -84,6 +84,7 @@ class Vehicle:
         self._battery = Battery()
         self.servo: dict[int, int] = {}          # 1-based channel -> raw PWM
         self.params: dict[str, float] = {}        # PARAM_VALUE cache
+        self.statustexts: deque[tuple[float, str]] = deque(maxlen=50)
 
         self._poses: deque[Pose] = deque(maxlen=4096)
 
@@ -254,6 +255,8 @@ class Vehicle:
                 }
             elif t == "PARAM_VALUE":
                 self.params[msg.param_id] = msg.param_value
+            elif t == "STATUSTEXT":
+                self.statustexts.append((now, msg.text))
         if t == "COMMAND_ACK":
             with self._ack_cond:
                 self._acks[msg.command] = msg.result
@@ -464,8 +467,13 @@ class Vehicle:
             time.sleep(0.1)
         return ok and self.mode.upper() == name.upper()
 
-    def arm(self, timeout: float = 15.0) -> bool:
-        """Arm, retrying while pre-arm checks settle. Returns armed state."""
+    def arm(self, timeout: float = 60.0) -> bool:
+        """Arm, retrying while pre-arm checks settle. Returns armed state.
+
+        The default is generous on purpose: straight after a sim Reset the EKF
+        can take a minute to become armable, and a planner that gives up early
+        will simply never take off.
+        """
         if self.armed:
             return True
         end = time.monotonic() + timeout

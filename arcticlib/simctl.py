@@ -90,9 +90,16 @@ class _WSClient:
         self._sock.sendall(header + masked)
 
     def recv(self) -> Optional[str]:
-        """Read one text message, or None on a control frame we ignored."""
-        for _ in range(8):
+        """Read one complete text message, reassembling continuation frames.
+
+        gzweb's pose/info for a full scene exceeds one WebSocket frame, so the
+        server fragments it (FIN=0 followed by opcode-0 continuations). Ignoring
+        that truncated the JSON at ~16 KB.
+        """
+        data = b""
+        while True:
             h = self._read_exact(2)
+            fin = bool(h[0] & 0x80)
             opcode = h[0] & 0x0F
             ln = h[1] & 0x7F
             if ln == 126:
@@ -100,13 +107,16 @@ class _WSClient:
             elif ln == 127:
                 ln = struct.unpack(">Q", self._read_exact(8))[0]
             payload = self._read_exact(ln)
-            if opcode == 0x1:
-                return payload.decode("utf-8", "replace")
-            if opcode == 0x9:
+            if opcode == 0x9:                      # ping
                 self._send_pong(payload)
-            elif opcode == 0x8:
+                continue
+            if opcode == 0x8:                      # close
                 raise ConnectionError("gzweb closed the connection")
-        return None
+            if opcode in (0x0, 0x1, 0x2):          # continuation / text / binary
+                data += payload
+                if fin:
+                    return data.decode("utf-8", "replace")
+            # other opcodes ignored
 
 
 # --------------------------------------------------------------------------- #
