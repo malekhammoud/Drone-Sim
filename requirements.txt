@@ -1,0 +1,9 @@
+gnureadline
+billiard
+future
+numpy
+pyparsing
+MAVProxy
+# setuptools<81 is required on Python 3.14: MAVProxy imports pkg_resources,
+# which was removed from setuptools 81+.
+setuptools<81
