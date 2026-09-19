@@ -140,6 +140,12 @@ steps while someone is connected. Our connections literally drive the sim.
 - **Tower (AntennaTracker):** `MAV_CMD_DO_SET_SERVO` servo 1 = pan, servo 2 =
   tilt — **verified live**: `MAV_RESULT_ACCEPTED` and `SERVO_OUTPUT_RAW` changed
   to exactly the requested PWM. `set_mode("SCAN")` works (mode → `SCAN`).
+  **Servo range is 1100..1900 us** (`SERVO1/2_MIN/MAX`, verified by parameter
+  read), not 1000..2000 — the tracker clamps, so commanding 1000/2000 yields
+  1100/1900. ArduPilot normalises PWM over that range before the FDM plugin, so
+  the angle fit is pan `1500 us = 0 deg @ 2.2222 us/deg`, tilt `1420 us = level
+  @ 10.667 us/deg`. The tracker's `ATTITUDE` is **not** the camera orientation;
+  derive pointing from the commanded servo PWM + `base_yaw_deg`.
 - **Quad gimbal: NOT controllable.** `copter.parm` sets `MNT1_TYPE 0` and no
   mount params are exposed, so the "quadcopter gimbal" camera is a **fixed**
   camera. `Pose.gimbal_*` stays `None`; there is no gimbal command surface.

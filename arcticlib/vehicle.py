@@ -83,6 +83,7 @@ class Vehicle:
         self._sys_time_s: Optional[float] = None
         self._battery = Battery()
         self.servo: dict[int, int] = {}          # 1-based channel -> raw PWM
+        self.params: dict[str, float] = {}        # PARAM_VALUE cache
 
         self._poses: deque[Pose] = deque(maxlen=4096)
 
@@ -251,6 +252,8 @@ class Vehicle:
                     for i in range(1, 17)
                     if getattr(msg, f"servo{i}_raw", 0)
                 }
+            elif t == "PARAM_VALUE":
+                self.params[msg.param_id] = msg.param_value
         if t == "COMMAND_ACK":
             with self._ack_cond:
                 self._acks[msg.command] = msg.result
@@ -420,6 +423,26 @@ class Vehicle:
             return False
         return True
 
+    def get_param(self, name: str, timeout: float = 3.0) -> Optional[float]:
+        """Fetch a parameter. The reader thread caches PARAM_VALUE replies."""
+        name = name.upper()
+        if name in self.params:
+            return self.params[name]
+        mav = self._mav
+        if mav is None:
+            return None
+        try:
+            mav.mav.param_request_read_send(mav.target_system, mav.target_component,
+                                            name.encode(), -1)
+        except Exception:
+            return None
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            if name in self.params:
+                return self.params[name]
+            time.sleep(0.05)
+        return None
+
     def mode_number(self, name: str) -> Optional[int]:
         return MODE_MAPS.get(self.kind, {}).get(name.upper())
 
@@ -578,15 +601,18 @@ class Tower(Vehicle):
     """ArduPilot AntennaTracker mast: servo 1 = pan, servo 2 = tilt.
 
     The sim's plugin maps a 0..1 servo command to a joint angle as
-    ``multiplier * (offset + cmd)`` (RECON.md §4 / terrain/tower.py). With the
-    stock ArduPilot servo range 1000..2000 us that gives, exactly:
+    ``multiplier * (offset + cmd)`` (RECON.md §4 / terrain/tower.py). ArduPilot
+    normalises a PWM to 0..1 over the **channel's own min..max**, and the
+    tracker's servos are pinned to **1100..1900 us**, not 1000..2000 (verified:
+    commanding 1000/2000 yields SERVO_OUTPUT_RAW 1100/1900). With
+    ``SERVO1/2_MIN=1100, MAX=1900`` that gives, exactly:
 
-    * pan:  1500 us = 0 deg, +2.7778 us/deg  (1000 = -180, 2000 = +180)
-    * tilt: 1400 us = 0 deg elevation, +13.333 us/deg
-            (1000 = -30 deg, 2000 = +45 deg)
+    * pan:  1500 us = 0 deg, +2.2222 us/deg  (1100 = -180, 1900 = +180)
+    * tilt: 1420 us = 0 deg elevation, +10.667 us/deg
+            (1100 = -30 deg, 1900 = +45 deg)
 
     Those are the defaults; ``calib/tower_<name>.json`` overrides them, and
-    ``tools/calibrate_tower.py`` writes that file.
+    ``tools/calibrate_tower.py`` writes that file after verifying the loop.
     """
 
     kind = "tower"
@@ -606,10 +632,10 @@ class Tower(Vehicle):
         if path is None:
             path = os.path.join(self._calib_dir, f"tower_{self.spec.name}.json")
         default = {
-            "pan": {"center_pwm": 1500.0, "pwm_per_deg": 1000.0 / 360.0, "sign": 1,
-                    "min_pwm": 1000, "max_pwm": 2000, "base_yaw_deg": 0.0},
-            "tilt": {"zero_deg_pwm": 1400.0, "pwm_per_deg": 1000.0 / 75.0, "sign": 1,
-                     "min_pwm": 1000, "max_pwm": 2000},
+            "pan": {"center_pwm": 1500.0, "pwm_per_deg": 800.0 / 360.0, "sign": 1,
+                    "min_pwm": 1100, "max_pwm": 1900, "base_yaw_deg": 0.0},
+            "tilt": {"zero_deg_pwm": 1420.0, "pwm_per_deg": 800.0 / 75.0, "sign": 1,
+                     "min_pwm": 1100, "max_pwm": 1900},
         }
         if os.path.exists(path):
             try:

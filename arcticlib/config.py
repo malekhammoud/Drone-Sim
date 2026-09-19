@@ -147,6 +147,9 @@ class Config:
     origin_lon: float = -94.822428
     site_name: str = "fort_ross"
     site_extent_m: float = 6500.0
+    # Grid north's offset from true north at the site (deg). World +Y bears this
+    # from true north; used to turn grid headings into true bearings.
+    convergence_deg: float = -49.804793
     # World (EPSG:3413) coordinates of the site centre, used to map Gazebo world
     # metres to lat/lon. Filled from /api/site when available; the fallback is
     # the published Fort Ross bounds centre.
@@ -200,6 +203,7 @@ def load_config(path: str = "config.yaml") -> Config:
         origin_lon=_envf("ORIGIN_LON", -94.822428),
         site_name=_env("SITE_NAME", "fort_ross"),
         site_extent_m=_envf("SITE_EXTENT", 6500.0),
+        convergence_deg=_envf("CONVERGENCE_DEG", -49.804793),
         ps_centre_x=_envf("PS_CENTRE_X", -1502373.733),
         ps_centre_y=_envf("PS_CENTRE_Y", -1268596.501),
         heartbeat_timeout=_envf("HEARTBEAT_TIMEOUT", 5.0),

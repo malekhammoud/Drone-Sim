@@ -1,0 +1,17 @@
+{
+  "pan": {
+    "center_pwm": 1500.0,
+    "pwm_per_deg": 2.2222222222222223,
+    "sign": 1,
+    "min_pwm": 1100,
+    "max_pwm": 1900,
+    "base_yaw_deg": 0.0
+  },
+  "tilt": {
+    "zero_deg_pwm": 1420.0,
+    "pwm_per_deg": 10.666666666666666,
+    "sign": 1,
+    "min_pwm": 1100,
+    "max_pwm": 1900
+  }
+}
