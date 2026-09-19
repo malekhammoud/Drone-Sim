@@ -1,2 +1,8 @@
-/.venv
-mav.*
+.venv/
+__pycache__/
+mav.tlog
+mav.tlog.raw
+mav.parm
+smoke_frames/
+data/
+config.yaml

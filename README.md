@@ -1,122 +1,106 @@
-# drone-sim
+# drone-sim / arcticlib
 
-MAVProxy setup plus a keyboard flight controller for an ArduCopter in GUIDED mode.
+Infrastructure for the ArcticSim (Hack The North) challenge: connect to the four
+ArduPilot assets, read telemetry and camera frames, command flight, control the
+tower masts, and submit tracks. Other teammates build CV, planning and tracking
+on top of this package.
 
-## Setup
+Measured sim facts (endpoints, cameras, ground truth, quirks) are in
+[RECON.md](RECON.md). **Read that first.**
+
+## Documentation
+
+| Document | Contents |
+|---|---|
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | components, data flow, threading, coordinate frames, file map |
+| [docs/API.md](docs/API.md) | reference for every public class and method |
+| [docs/TOOLS.md](docs/TOOLS.md) | the scripts in `tools/` and how to run them |
+| [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | setup, tests, conventions, extending, troubleshooting |
+| [RECON.md](RECON.md) | measured sim facts |
+
+## Install
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
+python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-`requirements.txt` includes `setuptools<81`, which is required on Python 3.14
-because MAVProxy imports `pkg_resources` (removed from setuptools 81+).
+## 30-line quickstart
 
-## MAVProxy smoke test
+```python
+from arcticlib import Fleet, load_config
+from arcticlib.geo import destination
+
+cfg = load_config()                      # ARCTICSIM_* env vars override
+fleet = Fleet.from_config(cfg)           # connects 4 MAVLink links + cameras
+fleet.wait_ready(20)
+
+q = fleet.quad                           # Copter; fleet.plane, fleet.tower1/2
+q.takeoff(20)                            # GUIDED -> arm -> takeoff (atomic)
+lat, lon = destination(q.pose().lat, q.pose().lon, bearing=45, dist_m=400)
+q.goto(lat, lon, 25)                     # fly there and hold
+
+pose = fleet.pose("quadcopter")          # latest Pose (lat/lon/alt/yaw/…)
+p_lag = fleet.pose_at("quadcopter", pose.t_sim - 0.1)   # interpolated by sim time
+
+frame = fleet.frame("quadcopter", poll=True)            # non-blocking latest
+print(frame.width, frame.height, frame.image.shape)     # BGR ndarray
+
+fleet.tower1.point(az_deg=30, el_deg=-5) # calibrated pan/tilt
+fleet.tower2.scan()
+
+fleet.tracks.post("Sierra One", 71.9965, -94.8448, heading=315, speed=6.5)
+print(fleet.tracks.list())
+
+fleet.shutdown()
+```
+
+Run `python tools/smoke_test.py` to verify every piece against the live sim
+(23 checks: links, poses, copter/plane flight, towers, cameras, tracks).
+
+## Layout
+
+```
+arcticlib/
+  config.py   endpoints, camera intrinsics, site origin (env / config.yaml)
+  geo.py      lat/lon <-> local ENU metres, bearings, sim world frame
+  types.py    Pose, Frame, Detection, Battery, AssetStatus  (the contract)
+  vehicle.py  Vehicle + Copter/Plane/Tower: reconnect, pose history, commands
+  camera.py   CameraSource: latest() polling + stream() MJPEG
+  tracks.py   TrackClient: post/list with retries and rate limiting
+  simctl.py   SimClient: sim_time(), reset(), wait_until_ready()
+  groundtruth.py  target vessel's true pose — DEV ONLY, gated on ARCTICSIM_DEV=1
+  fleet.py    Fleet.from_config(): everything wired together
+  mock.py     MockFleet: identical API, synthetic world, no network
+tools/
+  smoke_test.py     end-to-end PASS/FAIL against the live sim
+  record.py         labelled dataset recorder (JPEG + JSONL sidecar)
+  dashboard_cli.py  live terminal ENU map + status table
+  calibrate_tower.py  verify/write calib/tower_<name>.json
+tests/          unit tests for geo and pose interpolation
+```
+
+## Tests
 
 ```bash
-./test_mavproxy.sh
+python -m unittest discover -s tests
 ```
 
-Runs `mavproxy.py --master=udpout:10.99.1.1:14550`, feeds it `exit`, and reports
-PASS if MAVProxy starts and opens the master link.
+## Simulation control
 
-## Keyboard flight control
+If `14550` goes silent, check `/api/status` before blaming the tunnel (see
+RECON.md §3): the sim server may just be idle. `fleet.sim.reset()` restarts it
+and `fleet.sim.wait_until_ready()` blocks until the assets answer again; the
+reader threads reconnect on their own.
 
-```bash
-./fly.sh
-```
+## Keyboard flight controller
 
-or directly:
+The original manual controller is still here — `./fly.sh` (arrows fly, WASD
+altitude/yaw, T takeoff, L land). See the docstring in `keyboard_control.py`.
 
-```bash
-source .venv/bin/activate
-python keyboard_control.py --master=udpout:10.99.1.1:14550
-```
+## Ground truth (dev only)
 
-### Controls
-
-| Key            | Action                        |
-|----------------|-------------------------------|
-| Up / Down      | fly forward / backward        |
-| Left / Right   | strafe left / right           |
-| W / S          | climb / descend               |
-| A / D          | yaw left / right              |
-| Space          | stop now (hover)              |
-| T              | take off (arms if needed, climbs to takeoff altitude) |
-| L              | land                          |
-| Q / Ctrl-C     | quit (stops and hovers)       |
-
-The HUD shows the current mode, armed state, altitude, speed and the body-frame
-command being streamed.
-
-### How it works
-
-The aircraft is in **GUIDED** mode. The program streams
-`SET_POSITION_TARGET_LOCAL_NED` messages at ~30 Hz with a velocity vector in
-`MAV_FRAME_BODY_OFFSET_NED` plus a yaw rate. Because the frame is relative to
-the aircraft's heading, "forward" always means "where the nose points".
-
-Commands are slew-limited so the aircraft does not jerk, and no keys held means
-zero velocity (brake to hover). Since a terminal has no key-up events, a key
-counts as held until it has not been seen for ~0.65 s (key auto-repeat keeps it
-alive). Press Space to stop immediately.
-
-### Options
-
-```
---master MASTER        MAVLink connection string (default udpout:10.99.1.1:14550)
---max-speed M          max horizontal speed, m/s (default 3)
---max-climb M          max vertical speed, m/s (default 1.5)
---max-yaw-rate DEG     max yaw rate, deg/s (default 60)
---takeoff-alt M        altitude for the T key, m (default 15)
---no-guided            do not switch flight mode; only warn if not GUIDED
---self-test            run a scripted takeoff/forward/land test and exit
-```
-
-### Verify it works
-
-The built-in self-test takes off if the vehicle is on the ground, flies forward
-for a few seconds, brakes, then lands:
-
-```bash
-./fly.sh --self-test
-```
-
-Expected output ends with `SELF-TEST PASS`.
-
-## Sim server (ArcticSim)
-
-The vehicle lives behind a competition sim server reachable through the
-WireGuard tunnel at `10.99.1.1`. It exposes a control API on port **8090** and a
-web panel on port **8080**:
-
-```bash
-curl -s http://10.99.1.1:8090/api/status          # {"state": "...", "detail": "..."}
-curl -s http://10.99.1.1:8090/api/assets          # per-asset mavlink/camera flags
-curl -s "http://10.99.1.1:8090/api/logs?tail=50"  # server/container log tail
-```
-
-If `state` is `idle` and the `quadcopter` asset shows `"mavlink": false`, the
-simulation is not running: nothing will answer on `14550` even though the tunnel
-is fine. Use the **Reset** button on http://10.99.1.1:8080 (or
-`POST /api/reset`) and wait a minute or two for gzweb and the assets to come
-back. `POST /api/rebuild` does a full rebuild and takes several minutes.
-
-A healthy asset looks like `"mavlink": true, "camera": true`. Note that a reset
-leaves the drone **disarmed on the ground in STABILIZE**; press **T** in the
-controller to arm and take off.
-
-## Notes
-
-- `Failed to load module: No module named 'adsb'` in MAVProxy is harmless; it is
-  an optional module.
-- On Python 3.14, MAVProxy fails with `No module named 'pkg_resources'` unless
-  `setuptools<81` is installed.
-- GUIDED velocity control only works while the vehicle is armed and flying. If
-  it is disarmed, press **T** (the controller switches to GUIDED and arms
-  automatically), or arm it yourself.
-- If `14550` stops answering, check `/api/status` before blaming the tunnel:
-  `ping 10.99.1.1` working while MAVLink is silent usually means the sim is
-  stopped, not that WireGuard is broken.
+`arcticlib/groundtruth.py` reads the target vessel's true pose from the gzweb
+`~/pose/info` stream. It **refuses to construct** unless `ARCTICSIM_DEV=1` and
+logs a loud warning. It exists for auto-labelling and offline scoring only —
+using it in the judged run is cheating, so never import it from autonomous code.
