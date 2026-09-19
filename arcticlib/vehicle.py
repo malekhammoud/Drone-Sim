@@ -615,10 +615,34 @@ class Plane(Vehicle):
         return False
 
     def goto(self, lat: float, lon: float, alt: float, timeout: float = 6.0) -> bool:
-        """Loiter around (lat, lon) at ``alt``. GUIDED global setpoint."""
+        """Fly to / loiter around (lat, lon) at ``alt``.
+
+        ArduPlane SITL requires MAV_CMD_DO_REPOSITION via command_int_send
+        (it ignores set_position_target_global_int in GUIDED mode).
+        """
         if self.mode.upper() not in ("GUIDED", "AUTO") and not self.set_mode("GUIDED"):
             return False
-        return self.send_global_target(lat, lon, alt)
+        mav = self._mav
+        if mav is None:
+            return False
+        try:
+            mav.mav.command_int_send(
+                self.spec.sysid, 1,
+                M.MAV_FRAME_GLOBAL_RELATIVE_ALT,
+                M.MAV_CMD_DO_REPOSITION,
+                0, 0,
+                -1,  # p1: ground speed (-1 is use-default)
+                M.MAV_DO_REPOSITION_FLAGS_CHANGE_MODE,  # p2: flags
+                0,   # p3: loiter radius (0 is default)
+                0,   # p4: yaw
+                int(lat * 1e7),
+                int(lon * 1e7),
+                float(alt)
+            )
+            return True
+        except Exception as exc:
+            log.warning("%s: DO_REPOSITION failed: %s", self.spec.name, exc)
+            return False
 
     def loiter(self, lat: float, lon: float, alt: float,
                radius: Optional[float] = None) -> bool:

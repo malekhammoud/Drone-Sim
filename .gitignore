@@ -6,3 +6,11 @@ mav.parm
 smoke_frames/
 data/
 config.yaml
+patrol_run/
+patrol_output/
+debug_live_snap/
+terrain_tile.jpg
+terrain_mosaic.jpg
+*.mp4
+patrol_plan*.png
+models/
