@@ -515,24 +515,44 @@ class Copter(Vehicle):
 
     kind = "copter"
 
-    def takeoff(self, alt: float = 15.0, timeout: float = 45.0) -> bool:
-        """GUIDED -> arm -> TAKEOFF as one sequence.
+    def takeoff(self, alt: float = 15.0, timeout: float = 120.0) -> bool:
+        """GUIDED -> arm -> TAKEOFF -> climb, retrying until it works.
 
-        The arm state only lasts ~3 s on this sim, so the takeoff command must
-        follow the arm immediately; we therefore send it as soon as HEARTBEAT
-        reports armed and only then wait for the climb.
+        Straight after a sim Reset the EKF needs ~1-2 min to converge. The
+        autopilot will happily accept `arm` and `NAV_TAKEOFF` during that window
+        but hold the motors at idle and then **auto-disarm** ("Disarming
+        motors"), so a single attempt looks like a rejected takeoff. We therefore
+        loop: if the vehicle disarms without climbing, re-arm and try again until
+        the whole ``timeout`` is spent. The arm state only lasts ~3 s, so the
+        takeoff command follows the arm immediately.
         """
-        if not self.set_mode("GUIDED"):
-            log.warning("%s: takeoff aborted, not GUIDED", self.spec.name)
-            return False
-        if not self.armed and not self.arm():
-            log.warning("%s: takeoff aborted, arm failed", self.spec.name)
-            return False
-        if not self._send_command(M.MAV_CMD_NAV_TAKEOFF,
-                                  [0, 0, 0, 0, 0, 0, alt], timeout=timeout):
-            log.warning("%s: TAKEOFF not accepted", self.spec.name)
-            return False
-        return self.wait_alt(alt * 0.8, timeout=timeout)
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if not self.set_mode("GUIDED", timeout=4.0):
+                time.sleep(1.0)
+                continue
+            if not self.armed:
+                remaining = max(5.0, deadline - time.monotonic())
+                if not self.arm(timeout=min(60.0, remaining)):
+                    time.sleep(1.0)
+                    continue
+            if not self._send_command(M.MAV_CMD_NAV_TAKEOFF,
+                                      [0, 0, 0, 0, 0, 0, alt], timeout=6.0):
+                time.sleep(1.0)
+                continue
+            climb_until = min(deadline, time.monotonic() + 30.0)
+            while time.monotonic() < climb_until:
+                if self.alt_rel >= alt * 0.8:
+                    return True
+                if not self.armed:
+                    log.info("%s: auto-disarmed during takeoff; retrying "
+                             "(EKF still settling?)", self.spec.name)
+                    break
+                time.sleep(0.2)
+            if self.alt_rel >= alt * 0.8:
+                return True
+        log.warning("%s: takeoff did not climb within %.0fs", self.spec.name, timeout)
+        return False
 
     def wait_alt(self, alt_rel: float, timeout: float = 45.0) -> bool:
         end = time.monotonic() + timeout
@@ -573,13 +593,26 @@ class Plane(Vehicle):
 
     kind = "plane"
 
-    def takeoff(self, alt: float = 80.0, timeout: float = 60.0) -> bool:
-        """GUIDED -> arm -> mode TAKEOFF (it climbs and circles)."""
-        if not self.set_mode("GUIDED"):
-            return False
-        if not self.armed and not self.arm():
-            return False
-        return self.set_mode("TAKEOFF", timeout=timeout)
+    def takeoff(self, alt: float = 80.0, timeout: float = 120.0) -> bool:
+        """GUIDED -> arm -> mode TAKEOFF, retrying while the EKF settles.
+
+        Like the copter, a fresh reset leaves pre-arm checks unhappy for a
+        while; the plane will not arm until they pass, so retry until timeout.
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if not self.set_mode("GUIDED", timeout=4.0):
+                time.sleep(1.0)
+                continue
+            if not self.armed:
+                remaining = max(5.0, deadline - time.monotonic())
+                if not self.arm(timeout=min(60.0, remaining)):
+                    time.sleep(1.0)
+                    continue
+            if self.set_mode("TAKEOFF", timeout=6.0):
+                return True
+            time.sleep(1.0)
+        return False
 
     def goto(self, lat: float, lon: float, alt: float, timeout: float = 6.0) -> bool:
         """Loiter around (lat, lon) at ``alt``. GUIDED global setpoint."""
