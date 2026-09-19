@@ -61,8 +61,17 @@ Ports are `8600 + 10*slot` **on the sim host** (not per asset), proven live:
 | tower-2 | EO | `:8640` | 39 KB JPEG |
 | rover | FPV | `:8650` | absent (not rostered) |
 
-Resolution/FOV from the slides: quad 640×480 HFOV 114.6° VFOV ~99.4°; fixed-wing
-640×360 HFOV 69.0° VFOV ~42.6°; towers 640×360 HFOV 60.0° VFOV ~36.1°.
+Resolution/FOV: **measured from the sensor SDFs**, which differ from the slides
+(those quote the 640-wide display size, not the sensor):
+
+| asset | sensor | resolution | HFOV | VFOV |
+|---|---|---|---|---|
+| quadcopter | `gimbal_small_2d` | 960×720 | 114.59° | 98.88° |
+| fixed-wing | `skywalker_x8` | 1280×720 | 68.98° | 42.19° |
+| tower-1/2 | `terrain/tower.py` | 1280×720 | 60.0° | 36.0° |
+| rover | `rover_front_camera` | 960×720 | 85.94° | 69.90° |
+
+(Verified live: `/snapshot.jpg` returns exactly these sizes.)
 **Bottleneck:** encoding is skipped when no client is connected, but the sensor
 renders regardless; each live camera costs ~a CPU core. Use `/snapshot.jpg` at a
 chosen rate rather than holding `/stream` open when possible.
@@ -119,9 +128,13 @@ steps while someone is connected. Our connections literally drive the sim.
 ### Commands (verified)
 - **Copter:** `mode GUIDED` → `arm` → `MAV_CMD_NAV_TAKEOFF(alt)` **immediately**
   (arm auto-disarms after ~3 s). `goto(lat,lon,alt)` via
-  `SET_POSITION_TARGET_GLOBAL_INT`. `land()` = `mode LAND`, `rtl()` = `mode RTL`.
+  `SET_POSITION_TARGET_GLOBAL_INT` (`MAV_FRAME_GLOBAL_RELATIVE_ALT_INT`).
+  `land()` = `mode LAND`, `rtl()` = `mode RTL`.
   Velocity via `SET_POSITION_TARGET_LOCAL_NED` (`BODY_OFFSET_NED`, ~30 Hz) — this
   is what the existing keyboard script uses and it is proven.
+  **`MAV_CMD_DO_REPOSITION` is UNSUPPORTED here** (`MAV_RESULT_UNSUPPORTED`,
+  verified on copter *and* plane) — use the global setpoint, which is also what
+  MAVProxy's `guided` uses.
 - **Plane:** `mode GUIDED` → `arm` → `mode TAKEOFF` (it climbs and circles); then
   `goto` = loiter around the point. Cannot hover.
 - **Tower (AntennaTracker):** `MAV_CMD_DO_SET_SERVO` servo 1 = pan, servo 2 =
