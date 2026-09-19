@@ -8,6 +8,16 @@ on top of this package.
 Measured sim facts (endpoints, cameras, ground truth, quirks) are in
 [RECON.md](RECON.md). **Read that first.**
 
+## Documentation
+
+| Document | Contents |
+|---|---|
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | components, data flow, threading, coordinate frames, file map |
+| [docs/API.md](docs/API.md) | reference for every public class and method |
+| [docs/TOOLS.md](docs/TOOLS.md) | the scripts in `tools/` and how to run them |
+| [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | setup, tests, conventions, extending, troubleshooting |
+| [RECON.md](RECON.md) | measured sim facts |
+
 ## Install
 
 ```bash
