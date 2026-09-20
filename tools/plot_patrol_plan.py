@@ -39,6 +39,7 @@ import numpy as np
 from arcticlib.config import load_config
 from arcticlib.geo import distance_m
 from tools.patrol_and_record import generate_safe_strait_waypoints
+from ollama_control import query_tether  # NEW
 
 
 def deg2num(lat_deg: float, lon_deg: float, zoom: int) -> tuple[int, int]:
@@ -56,6 +57,46 @@ def num2deg(xtile: int, ytile: int, zoom: int) -> tuple[float, float]:
     return (math.degrees(lat_rad), lon_deg)
 
 
+# NEW: translates a natural-language --ai-event into the existing --closed-zone
+# / --intercept args, so nothing downstream needs to know the AI was involved.
+def resolve_ai_event(args: argparse.Namespace) -> None:
+    print(f"Querying AI supervisor: {args.ai_event!r}")
+    decision = query_tether(args.ai_event)
+
+    if decision is None:
+        print("AI supervisor returned no valid decision — proceeding without an overlay.")
+        return
+
+    action = decision.get("action")
+    lat = decision.get("lat")
+    lon = decision.get("lon")
+    reason = decision.get("reason", "")
+
+    valid_coords = (
+        isinstance(lat, (int, float)) and isinstance(lon, (int, float))
+        and -90 <= lat <= 90 and -180 <= lon <= 180
+    )
+
+    print(f"AI decision: {action} at ({lat}, {lon}) — {reason}")
+
+    if not valid_coords and action in ("CLOSED_ZONE", "INTERCEPT"):
+        print(f"AI returned invalid or missing coordinates for action '{action}' — skipping overlay.")
+        return
+
+    if action == "CLOSED_ZONE":
+        radius = decision.get("radius_m", 500)
+        if not isinstance(radius, (int, float)) or radius <= 0:
+            print(f"AI returned invalid radius_m ({radius!r}) — defaulting to 500m.")
+            radius = 500
+        args.closed_zone = f"{lat},{lon},{radius}"
+    elif action == "INTERCEPT":
+        args.intercept = f"{lat},{lon}"
+    elif action == "ABORT":
+        print("AI supervisor returned ABORT — no overlay will be drawn.")
+    else:
+        print(f"Unrecognized action '{action}' — skipping overlay.")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Plot Fixed-Wing Patrol Plan with optional tactical overlays.")
     parser.add_argument("--out", default="patrol_plan_alternative.png", help="Output plot filename")
@@ -68,7 +109,13 @@ def main() -> int:
                         help="Closed zone overlay formatted as 'lat,lon,radius_m' (e.g. '71.995,-94.810,800')")
     parser.add_argument("--intercept", type=str, default=None,
                         help="Dynamic intercept coordinate target as 'lat,lon' (e.g. '71.985,-94.750')")
+    parser.add_argument("--ai-event", type=str, default=None,  # NEW
+                        help="Natural-language tactical event description, routed through the AI supervisor "
+                             "to decide the overlay (e.g., 'Unknown attack reported near tower 1')")
     args = parser.parse_args()
+
+    if args.ai_event:  # NEW — only runs if the flag is passed; otherwise behaves exactly as before
+        resolve_ai_event(args)
 
     mosaic_path = "strait_full_mosaic.jpg"
     if not os.path.exists(mosaic_path):
