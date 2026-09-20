@@ -5,6 +5,8 @@ import unittest
 
 from arcticlib.geo import (
     distance_m,
+    generate_figure8_pattern,
+    generate_racetrack_pattern,
     generate_search_spiral,
     reroute_around_closed_zone,
     segment_circle_dist_m,
@@ -40,6 +42,35 @@ class TestTacticalPlanning(unittest.TestCase):
 
         for i in range(len(distances) - 1):
             self.assertGreater(distances[i+1], distances[i])
+
+    def test_generate_figure8_pattern(self):
+        c_lat, c_lon = 71.985, -94.750
+        fig8 = generate_figure8_pattern(c_lat, c_lon, bearing_deg=85.0, length_m=400.0, width_m=160.0, alt=75.0, num_cycles=2)
+        # Each cycle has 10 waypoints (2 overflight passes + 2 reversal loops)
+        self.assertEqual(len(fig8), 20)
+
+        # Verify overflight waypoints pass directly over center
+        overflights = [w for w in fig8 if "Overflight" in w[3]]
+        self.assertEqual(len(overflights), 4)
+        for ow in overflights:
+            dist = distance_m(ow[0], ow[1], c_lat, c_lon)
+            self.assertLess(dist, 1.0)  # Exactly at center
+
+        # Verify extension waypoints reach ~400m
+        extensions = [w for w in fig8 if "Extension" in w[3]]
+        for ew in extensions:
+            dist = distance_m(ew[0], ew[1], c_lat, c_lon)
+            self.assertAlmostEqual(dist, 400.0, delta=10.0)
+
+    def test_generate_racetrack_pattern(self):
+        c_lat, c_lon = 71.985, -94.750
+        race = generate_racetrack_pattern(c_lat, c_lon, bearing_deg=85.0, length_m=400.0, width_m=160.0, alt=75.0, num_cycles=2)
+        self.assertEqual(len(race), 12)
+        overflights = [w for w in race if "Overflight" in w[3]]
+        self.assertEqual(len(overflights), 2)
+        for ow in overflights:
+            dist = distance_m(ow[0], ow[1], c_lat, c_lon)
+            self.assertLess(dist, 1.0)
 
     def test_reroute_around_closed_zone(self):
         # Create a simple synthetic line of waypoints

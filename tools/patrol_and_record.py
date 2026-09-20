@@ -39,6 +39,7 @@ from arcticlib.fleet import Fleet
 from arcticlib.geo import (
     Georef,
     distance_m,
+    generate_figure8_pattern,
     generate_search_spiral,
     reroute_around_closed_zone,
 )
@@ -477,9 +478,9 @@ def main() -> int:
                             plane.goto(v_lat, v_lon, 75.0)
                             last_goto_time = now
                     elif mission_state == STATE_SPIRAL:
-                        log.info("🎯 TARGET RE-SIGHTED during spiral! Re-centering search at (%.5f, %.5f)...",
+                        log.info("🎯 TARGET RE-SIGHTED! Re-centering Figure-8 overflight pattern at (%.5f, %.5f)...",
                                  v_lat, v_lon)
-                        spiral_waypoints = generate_search_spiral(v_lat, v_lon, alt=75.0, r0=100.0, dr=130.0, r_max=650.0)
+                        spiral_waypoints = generate_figure8_pattern(v_lat, v_lon, bearing_deg=85.0, length_m=400.0, width_m=160.0, alt=75.0)
                         spiral_idx = 0
                         if not args.no_fly:
                             plane.goto(spiral_waypoints[0][0], spiral_waypoints[0][1], 75.0)
@@ -566,11 +567,11 @@ def main() -> int:
                                  target_track_id, target_vessel_pos[0], target_vessel_pos[1], dist_to_target)
 
                     if dist_to_target < 160.0:
-                        log.info("📍 Arrived at intercept location (dist=%.0fm). Beginning expanding spiral search around (%.5f, %.5f)...",
+                        log.info("📍 Arrived at intercept location (dist=%.0fm). Beginning Figure-8 overflight search around (%.5f, %.5f)...",
                                  dist_to_target, target_vessel_pos[0], target_vessel_pos[1])
                         mission_state = STATE_SPIRAL
-                        spiral_waypoints = generate_search_spiral(target_vessel_pos[0], target_vessel_pos[1],
-                                                                  alt=75.0, r0=100.0, dr=130.0, r_max=650.0)
+                        spiral_waypoints = generate_figure8_pattern(target_vessel_pos[0], target_vessel_pos[1],
+                                                                    bearing_deg=85.0, length_m=400.0, width_m=160.0, alt=75.0)
                         spiral_idx = 0
                         plane.goto(spiral_waypoints[0][0], spiral_waypoints[0][1], 75.0)
                         last_goto_time = now

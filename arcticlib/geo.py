@@ -232,6 +232,111 @@ def generate_search_spiral(center_lat: float,
     return waypoints
 
 
+def generate_figure8_pattern(center_lat: float,
+                             center_lon: float,
+                             bearing_deg: float = 85.0,
+                             length_m: float = 400.0,
+                             width_m: float = 160.0,
+                             alt: float = 75.0,
+                             num_cycles: int = 3) -> list[tuple[float, float, float, str]]:
+    """Generate a Bowtie / Figure-8 maritime search & overflight tracking pattern.
+
+    Replaces the spiral pattern with alternating straight overflight passes directly
+    over (center_lat, center_lon) aligned with the waterway axis (bearing_deg).
+
+    Advantages over the spiral:
+    1. Straight overflight runs: wings are completely level (roll=0), nose is pointed
+       directly at the vessel, keeping it dead-center in the camera field of view
+       for 15-25 seconds per pass.
+    2. Continuous re-attack: crosses the vessel from both directions (e.g. East & West),
+       maximizing detection probability and depression angle while never getting stuck
+       banking in a blind loiter circle.
+    3. Channel-aligned: stays along the navigable water channel, avoiding surrounding terrain.
+
+    Parameters:
+        center_lat, center_lon: Center coordinates (vessel position or sighting).
+        bearing_deg: Primary axis of the strait / vessel track (default: 85.0 deg).
+        length_m: Half-length of the overflight run (default: 400m).
+        width_m: Lateral turn offset for the 180-degree reversals (default: 160m).
+        alt: Flight altitude in metres (default: 75m).
+        num_cycles: Number of figure-8 cycles to generate (default: 3).
+
+    Returns:
+        List of (lat, lon, alt, name) waypoints.
+    """
+    waypoints = []
+    fwd_bearing = bearing_deg % 360.0
+    rev_bearing = (bearing_deg + 180.0) % 360.0
+    right_bearing = (bearing_deg + 90.0) % 360.0
+    left_bearing = (bearing_deg - 90.0) % 360.0
+
+    p_center = (center_lat, center_lon)
+    p_fwd = destination(center_lat, center_lon, fwd_bearing, length_m)
+    p_aft = destination(center_lat, center_lon, rev_bearing, length_m)
+
+    p_fwd_right = destination(p_fwd[0], p_fwd[1], right_bearing, width_m)
+    p_mid_right = destination(center_lat, center_lon, right_bearing, width_m)
+    p_aft_left = destination(p_aft[0], p_aft[1], left_bearing, width_m)
+    p_mid_left = destination(center_lat, center_lon, left_bearing, width_m)
+
+    for cycle in range(num_cycles):
+        c_num = cycle + 1
+        # Pass 1: Aft -> Center (Overflight) -> Fwd
+        waypoints.append((p_aft[0], p_aft[1], alt, f"Fig8_C{c_num}_InboundAft"))
+        waypoints.append((p_center[0], p_center[1], alt, f"Fig8_C{c_num}_Overflight_Fwd"))
+        waypoints.append((p_fwd[0], p_fwd[1], alt, f"Fig8_C{c_num}_ExtensionFwd"))
+
+        # Right reversal loop (smooth 180 degree turn outside viewing area)
+        waypoints.append((p_fwd_right[0], p_fwd_right[1], alt, f"Fig8_C{c_num}_TurnRightApex"))
+        waypoints.append((p_mid_right[0], p_mid_right[1], alt, f"Fig8_C{c_num}_TurnRightBase"))
+
+        # Pass 2: Fwd -> Center (Overflight) -> Aft
+        waypoints.append((p_fwd[0], p_fwd[1], alt, f"Fig8_C{c_num}_InboundFwd"))
+        waypoints.append((p_center[0], p_center[1], alt, f"Fig8_C{c_num}_Overflight_Rev"))
+        waypoints.append((p_aft[0], p_aft[1], alt, f"Fig8_C{c_num}_ExtensionAft"))
+
+        # Left reversal loop (smooth 180 degree turn outside viewing area)
+        waypoints.append((p_aft_left[0], p_aft_left[1], alt, f"Fig8_C{c_num}_TurnLeftApex"))
+        waypoints.append((p_mid_left[0], p_mid_left[1], alt, f"Fig8_C{c_num}_TurnLeftBase"))
+
+    return waypoints
+
+
+def generate_racetrack_pattern(center_lat: float,
+                               center_lon: float,
+                               bearing_deg: float = 85.0,
+                               length_m: float = 400.0,
+                               width_m: float = 160.0,
+                               alt: float = 75.0,
+                               num_cycles: int = 3) -> list[tuple[float, float, float, str]]:
+    """Generate a Racetrack overflight pattern oriented along bearing_deg."""
+    waypoints = []
+    fwd_bearing = bearing_deg % 360.0
+    rev_bearing = (bearing_deg + 180.0) % 360.0
+    offset_bearing = (bearing_deg + 90.0) % 360.0
+
+    p_center = (center_lat, center_lon)
+    p_fwd = destination(center_lat, center_lon, fwd_bearing, length_m)
+    p_aft = destination(center_lat, center_lon, rev_bearing, length_m)
+
+    p_fwd_out = destination(p_fwd[0], p_fwd[1], offset_bearing, width_m)
+    p_mid_out = destination(center_lat, center_lon, offset_bearing, width_m)
+    p_aft_out = destination(p_aft[0], p_aft[1], offset_bearing, width_m)
+
+    for cycle in range(num_cycles):
+        c_num = cycle + 1
+        # Straight overflight leg directly over vessel
+        waypoints.append((p_aft[0], p_aft[1], alt, f"Race_C{c_num}_Inbound"))
+        waypoints.append((p_center[0], p_center[1], alt, f"Race_C{c_num}_Overflight"))
+        waypoints.append((p_fwd[0], p_fwd[1], alt, f"Race_C{c_num}_Outbound"))
+        # Racetrack return leg
+        waypoints.append((p_fwd_out[0], p_fwd_out[1], alt, f"Race_C{c_num}_TurnFwd"))
+        waypoints.append((p_mid_out[0], p_mid_out[1], alt, f"Race_C{c_num}_Downwind"))
+        waypoints.append((p_aft_out[0], p_aft_out[1], alt, f"Race_C{c_num}_TurnAft"))
+
+    return waypoints
+
+
 def reroute_around_closed_zone(waypoints: list[tuple[float, float, float, str]],
                                c_lat: float,
                                c_lon: float,

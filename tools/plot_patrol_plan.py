@@ -39,6 +39,7 @@ import numpy as np
 from arcticlib.config import load_config
 from arcticlib.geo import (
     distance_m,
+    generate_figure8_pattern,
     generate_search_spiral,
     reroute_around_closed_zone,
 )
@@ -276,14 +277,14 @@ def main() -> int:
             # Dynamic transit line from aircraft start to intercept point
             ax.plot([plane_start[1], it_lon], [plane_start[0], it_lat], color="magenta", linestyle=":", linewidth=2.5, zorder=9, label="Transit to Target")
 
-            # Generate and draw expanding Archimedean search spiral around target
-            spiral_wps = generate_search_spiral(it_lat, it_lon, alt=75.0, r0=100.0, dr=130.0, r_max=650.0)
-            sp_lats = [it_lat] + [w[0] for w in spiral_wps]
-            sp_lons = [it_lon] + [w[1] for w in spiral_wps]
-            ax.plot(sp_lons, sp_lats, color="#FF00AA", linestyle="-", linewidth=2.0, alpha=0.85, zorder=10, label="Expanding Search Spiral (100m-650m)")
-            ax.scatter([w[1] for w in spiral_wps], [w[0] for w in spiral_wps], c="#FF00AA", s=25, edgecolors="white", linewidths=0.8, zorder=11)
+            # Generate and draw Bowtie / Figure-8 maritime overflight pattern around target
+            fig8_wps = generate_figure8_pattern(it_lat, it_lon, bearing_deg=85.0, length_m=400.0, width_m=160.0, alt=75.0, num_cycles=2)
+            f8_lats = [it_lat] + [w[0] for w in fig8_wps]
+            f8_lons = [it_lon] + [w[1] for w in fig8_wps]
+            ax.plot(f8_lons, f8_lats, color="#FF00AA", linestyle="-", linewidth=2.0, alpha=0.85, zorder=10, label="Figure-8 Overflight Pattern (400m x 160m)")
+            ax.scatter([w[1] for w in fig8_wps], [w[0] for w in fig8_wps], c="#FF00AA", s=25, edgecolors="white", linewidths=0.8, zorder=11)
 
-            print(f"Dynamic Intercept: Target at ({it_lat:.5f}, {it_lon:.5f}) with {len(spiral_wps)} spiral search waypoints (r=100m..650m).")
+            print(f"Dynamic Intercept: Target at ({it_lat:.5f}, {it_lon:.5f}) with {len(fig8_wps)} Figure-8 overflight waypoints.")
         except Exception as err:
             print(f"Error parsing --intercept parameter: {err}")
 
