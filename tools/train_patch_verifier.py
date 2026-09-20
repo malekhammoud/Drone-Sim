@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import os
 import random
 import sys
@@ -143,15 +144,16 @@ class PatchDataset(Dataset):
 # --------------------------------------------------------------------------- #
 # Data Generation & Extraction
 # --------------------------------------------------------------------------- #
-def extract_dataset_patches(dataset_dir: str, asset: str, patch_size: int = 48
+def extract_dataset_patches(dataset_dir: str, asset: str = "fixed-wing", patch_size: int = 48
                             ) -> Tuple[list[np.ndarray], list[int]]:
-    """Extract and auto-label patches from a recorded dataset using groundtruth."""
-    asset_dir = os.path.join(dataset_dir, asset)
-    sidecar_path = os.path.join(asset_dir, "sidecar.jsonl")
+    """Extract and auto-label patches from a recorded dataset using groundtruth and color anomaly."""
+    sidecar_path = os.path.join(dataset_dir, "sidecar.jsonl")
     if not os.path.exists(sidecar_path):
-        raise FileNotFoundError(f"Sidecar not found: {sidecar_path}")
+        sidecar_path = os.path.join(dataset_dir, asset, "sidecar.jsonl")
+    if not os.path.exists(sidecar_path):
+        raise FileNotFoundError(f"Sidecar not found in {dataset_dir} or {os.path.join(dataset_dir, asset)}")
 
-    detector = ColorAnomalyDetector(min_area=2, min_score=0.25, patch_size=patch_size)
+    detector = ColorAnomalyDetector(min_area=2, min_score=0.20, patch_size=patch_size)
     half_p = patch_size // 2
 
     positives: list[np.ndarray] = []
@@ -170,38 +172,56 @@ def extract_dataset_patches(dataset_dir: str, asset: str, patch_size: int = 48
                 continue
             h, w = img.shape[:2]
 
-            gt = data.get("groundtruth", {})
-            gt_pt = gt.get("point_px_approx")  # [u, v]
-            gt_u, gt_v = (float(gt_pt[0]), float(gt_pt[1])) if gt_pt else (None, None)
-            gt_in_frame = (gt_u is not None and 0 <= gt_u < w and 0 <= gt_v < h)
+            pose = data.get("pose")
+            gt = data.get("groundtruth")
+            dist_m = float("inf")
+            if pose and gt:
+                dlat = (pose["lat"] - gt["lat"]) * 111320
+                dlon = (pose["lon"] - gt["lon"]) * 111320 * math.cos(math.radians(pose["lat"]))
+                dist_m = math.hypot(dlat, dlon)
 
-            # If ground truth is in frame, extract positive patch centered on GT with jitter
-            if gt_in_frame:
-                for _ in range(5):  # 5 jittered positive crops
-                    du = random.uniform(-4, 4)
-                    dv = random.uniform(-4, 4)
-                    cu = int(round(gt_u + du))
-                    cv_ = int(round(gt_v + dv))
-                    x1 = max(0, min(w - patch_size, cu - half_p))
-                    y1 = max(0, min(h - patch_size, cv_ - half_p))
-                    crop = img[y1:y1+patch_size, x1:x1+patch_size]
-                    if crop.shape == (patch_size, patch_size, 3):
-                        positives.append(crop)
+            # Detect real boat if within 1500m
+            found_boat = False
+            boat_cx, boat_cy = None, None
 
-            # Run candidate detector to get hard negatives (false positives)
+            if dist_m < 1500:
+                b, g, r_ch = cv2.split(img)
+                red_diff = r_ch.astype(int) - np.maximum(b, g).astype(int)
+                red_mask = (red_diff > 16).astype(np.uint8)
+                num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(red_mask)
+                for label_idx in range(1, num_labels):
+                    area = stats[label_idx, cv2.CC_STAT_AREA]
+                    if 3 <= area <= 600:
+                        cx, cy = centroids[label_idx]
+                        if cy > 280:  # In water region below horizon
+                            found_boat = True
+                            boat_cx, boat_cy = cx, cy
+                            # Add jittered positive crops
+                            for _ in range(6):
+                                du = random.uniform(-3, 3)
+                                dv = random.uniform(-3, 3)
+                                cu = int(round(cx + du))
+                                cv_ = int(round(cy + dv))
+                                x1 = max(0, min(w - patch_size, cu - half_p))
+                                y1 = max(0, min(h - patch_size, cv_ - half_p))
+                                crop = img[y1:y1+patch_size, x1:x1+patch_size]
+                                if crop.shape == (patch_size, patch_size, 3):
+                                    positives.append(crop)
+                            break
+
+            # Run candidate detector to get hard negatives (false positives from shoreline/ice)
             candidates = detector.detect(img, extract_patches=True)
             for c in candidates:
-                if c.patch is None:
+                if c.patch is None or c.patch.shape != (patch_size, patch_size, 3):
                     continue
-                # Check distance to GT
-                if gt_in_frame:
-                    dist = c.dist_to(gt_u, gt_v)
-                    if dist <= 20.0:
+                if found_boat:
+                    dist_to_boat = math.hypot(c.cx - boat_cx, c.cy - boat_cy)
+                    if dist_to_boat <= 20.0:
                         positives.append(c.patch)
-                    elif dist > 40.0:
+                    elif dist_to_boat > 50.0:
                         negatives.append(c.patch)
                 else:
-                    # No boat in this frame, all candidates are negative
+                    # No boat in this frame, candidate is a hard negative
                     negatives.append(c.patch)
 
     print(f"Extracted from {dataset_dir}: {len(positives)} positive patches, {len(negatives)} negative patches")
@@ -413,8 +433,8 @@ def train_model(patches: list[np.ndarray], labels: list[int],
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Step 2: Train learned patch verifier CNN.")
-    parser.add_argument("--dataset", help="Path to recorded dataset directory (from tools/record.py)")
-    parser.add_argument("--asset", default="quadcopter", help="Asset name in dataset (default: quadcopter)")
+    parser.add_argument("--dataset", nargs="+", help="Path(s) to recorded dataset directory (from tools/record.py or tools/patrol_and_record.py)")
+    parser.add_argument("--asset", default="fixed-wing", help="Asset name in dataset (default: fixed-wing)")
     parser.add_argument("--bootstrap", action="store_true", help="Generate synthetic Arctic training data")
     parser.add_argument("--samples", type=int, default=1600, help="Number of bootstrap samples to generate")
     parser.add_argument("--epochs", type=int, default=15, help="Number of training epochs")
@@ -427,9 +447,13 @@ def main() -> int:
     labels: list[int] = []
 
     if args.dataset:
-        p, l = extract_dataset_patches(args.dataset, args.asset)
-        patches.extend(p)
-        labels.extend(l)
+        for ds in args.dataset:
+            try:
+                p, l = extract_dataset_patches(ds, args.asset)
+                patches.extend(p)
+                labels.extend(l)
+            except Exception as exc:
+                print(f"Warning: Failed to extract from {ds}: {exc}")
 
     if args.bootstrap or not patches:
         if not args.bootstrap and not patches:
