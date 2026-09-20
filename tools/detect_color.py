@@ -244,10 +244,11 @@ class ColorAnomalyDetector:
 def evaluate_dataset(dataset_dir: str, asset: str, detector: ColorAnomalyDetector,
                      out_dir: Optional[str] = None, max_frames: int = 0) -> dict:
     """Evaluate detector on a dataset recorded by tools/record.py."""
-    asset_dir = os.path.join(dataset_dir, asset)
-    sidecar_path = os.path.join(asset_dir, "sidecar.jsonl")
+    sidecar_path = os.path.join(dataset_dir, "sidecar.jsonl")
     if not os.path.exists(sidecar_path):
-        raise FileNotFoundError(f"Sidecar not found: {sidecar_path}")
+        sidecar_path = os.path.join(dataset_dir, asset, "sidecar.jsonl")
+    if not os.path.exists(sidecar_path):
+        raise FileNotFoundError(f"Sidecar not found in {dataset_dir} or {os.path.join(dataset_dir, asset)}")
 
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
