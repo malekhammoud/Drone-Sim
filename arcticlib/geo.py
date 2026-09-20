@@ -166,3 +166,240 @@ class Georef:
     @staticmethod
     def distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
         return distance_m(lat1, lon1, lat2, lon2)
+
+
+# --------------------------------------------------------------------------- #
+# Tactical Geodesy: Intercept Spirals & Closed-Zone Rerouting
+# --------------------------------------------------------------------------- #
+def segment_circle_dist_m(lat1: float, lon1: float,
+                          lat2: float, lon2: float,
+                          c_lat: float, c_lon: float) -> float:
+    """Compute the minimum distance in metres from circle center to segment (P1, P2)."""
+    georef = Georef(c_lat, c_lon)
+    x1, y1, _ = georef.to_enu(lat1, lon1)
+    x2, y2, _ = georef.to_enu(lat2, lon2)
+
+    dx, dy = x2 - x1, y2 - y1
+    seg_len_sq = dx * dx + dy * dy
+    if seg_len_sq < 1e-9:
+        return math.hypot(x1, y1)
+
+    # Project origin (0, 0) onto line segment: P(t) = P1 + t * (P2 - P1)
+    t = -(x1 * dx + y1 * dy) / seg_len_sq
+    t = max(0.0, min(1.0, t))
+    closest_x = x1 + t * dx
+    closest_y = y1 + t * dy
+    return math.hypot(closest_x, closest_y)
+
+
+def generate_search_spiral(center_lat: float,
+                           center_lon: float,
+                           alt: float = 75.0,
+                           r0: float = 100.0,
+                           dr: float = 130.0,
+                           r_max: float = 650.0,
+                           n_points_per_turn: int = 8,
+                           start_bearing: float = 0.0) -> list[tuple[float, float, float, str]]:
+    """Generate an expanding Archimedean search spiral around (center_lat, center_lon).
+
+    Parameters:
+        center_lat, center_lon: Center coordinates (last known boat sighting).
+        alt: Altitude in metres (default: 75m).
+        r0: Initial spiral radius in metres (default: 100m, > plane turning radius).
+        dr: Radial expansion per 360-degree turn in metres (default: 130m).
+        r_max: Maximum search radius in metres (default: 650m).
+        n_points_per_turn: Number of waypoints per revolution (default: 8).
+        start_bearing: Initial angle in degrees (default: 0 deg / North).
+
+    Returns:
+        List of (lat, lon, alt, name) waypoints.
+    """
+    waypoints = []
+    d_theta = 360.0 / n_points_per_turn
+    dr_step = dr / n_points_per_turn
+
+    k = 0
+    while True:
+        r_k = r0 + k * dr_step
+        if r_k > r_max:
+            break
+        bearing = (start_bearing + k * d_theta) % 360.0
+        wlat, wlon = destination(center_lat, center_lon, bearing, r_k)
+        wname = f"Spiral_{k+1}_r{r_k:.0f}m"
+        waypoints.append((wlat, wlon, alt, wname))
+        k += 1
+
+    return waypoints
+
+
+def generate_figure8_pattern(center_lat: float,
+                             center_lon: float,
+                             bearing_deg: float = 85.0,
+                             length_m: float = 400.0,
+                             width_m: float = 160.0,
+                             alt: float = 75.0,
+                             num_cycles: int = 3) -> list[tuple[float, float, float, str]]:
+    """Generate a Bowtie / Figure-8 maritime search & overflight tracking pattern.
+
+    Replaces the spiral pattern with alternating straight overflight passes directly
+    over (center_lat, center_lon) aligned with the waterway axis (bearing_deg).
+
+    Advantages over the spiral:
+    1. Straight overflight runs: wings are completely level (roll=0), nose is pointed
+       directly at the vessel, keeping it dead-center in the camera field of view
+       for 15-25 seconds per pass.
+    2. Continuous re-attack: crosses the vessel from both directions (e.g. East & West),
+       maximizing detection probability and depression angle while never getting stuck
+       banking in a blind loiter circle.
+    3. Channel-aligned: stays along the navigable water channel, avoiding surrounding terrain.
+
+    Parameters:
+        center_lat, center_lon: Center coordinates (vessel position or sighting).
+        bearing_deg: Primary axis of the strait / vessel track (default: 85.0 deg).
+        length_m: Half-length of the overflight run (default: 400m).
+        width_m: Lateral turn offset for the 180-degree reversals (default: 160m).
+        alt: Flight altitude in metres (default: 75m).
+        num_cycles: Number of figure-8 cycles to generate (default: 3).
+
+    Returns:
+        List of (lat, lon, alt, name) waypoints.
+    """
+    waypoints = []
+    fwd_bearing = bearing_deg % 360.0
+    rev_bearing = (bearing_deg + 180.0) % 360.0
+    right_bearing = (bearing_deg + 90.0) % 360.0
+    left_bearing = (bearing_deg - 90.0) % 360.0
+
+    p_center = (center_lat, center_lon)
+    p_fwd = destination(center_lat, center_lon, fwd_bearing, length_m)
+    p_aft = destination(center_lat, center_lon, rev_bearing, length_m)
+
+    p_fwd_right = destination(p_fwd[0], p_fwd[1], right_bearing, width_m)
+    p_mid_right = destination(center_lat, center_lon, right_bearing, width_m)
+    p_aft_left = destination(p_aft[0], p_aft[1], left_bearing, width_m)
+    p_mid_left = destination(center_lat, center_lon, left_bearing, width_m)
+
+    for cycle in range(num_cycles):
+        c_num = cycle + 1
+        # Pass 1: Aft -> Center (Overflight) -> Fwd
+        waypoints.append((p_aft[0], p_aft[1], alt, f"Fig8_C{c_num}_InboundAft"))
+        waypoints.append((p_center[0], p_center[1], alt, f"Fig8_C{c_num}_Overflight_Fwd"))
+        waypoints.append((p_fwd[0], p_fwd[1], alt, f"Fig8_C{c_num}_ExtensionFwd"))
+
+        # Right reversal loop (smooth 180 degree turn outside viewing area)
+        waypoints.append((p_fwd_right[0], p_fwd_right[1], alt, f"Fig8_C{c_num}_TurnRightApex"))
+        waypoints.append((p_mid_right[0], p_mid_right[1], alt, f"Fig8_C{c_num}_TurnRightBase"))
+
+        # Pass 2: Fwd -> Center (Overflight) -> Aft
+        waypoints.append((p_fwd[0], p_fwd[1], alt, f"Fig8_C{c_num}_InboundFwd"))
+        waypoints.append((p_center[0], p_center[1], alt, f"Fig8_C{c_num}_Overflight_Rev"))
+        waypoints.append((p_aft[0], p_aft[1], alt, f"Fig8_C{c_num}_ExtensionAft"))
+
+        # Left reversal loop (smooth 180 degree turn outside viewing area)
+        waypoints.append((p_aft_left[0], p_aft_left[1], alt, f"Fig8_C{c_num}_TurnLeftApex"))
+        waypoints.append((p_mid_left[0], p_mid_left[1], alt, f"Fig8_C{c_num}_TurnLeftBase"))
+
+    return waypoints
+
+
+def generate_racetrack_pattern(center_lat: float,
+                               center_lon: float,
+                               bearing_deg: float = 85.0,
+                               length_m: float = 400.0,
+                               width_m: float = 160.0,
+                               alt: float = 75.0,
+                               num_cycles: int = 3) -> list[tuple[float, float, float, str]]:
+    """Generate a Racetrack overflight pattern oriented along bearing_deg."""
+    waypoints = []
+    fwd_bearing = bearing_deg % 360.0
+    rev_bearing = (bearing_deg + 180.0) % 360.0
+    offset_bearing = (bearing_deg + 90.0) % 360.0
+
+    p_center = (center_lat, center_lon)
+    p_fwd = destination(center_lat, center_lon, fwd_bearing, length_m)
+    p_aft = destination(center_lat, center_lon, rev_bearing, length_m)
+
+    p_fwd_out = destination(p_fwd[0], p_fwd[1], offset_bearing, width_m)
+    p_mid_out = destination(center_lat, center_lon, offset_bearing, width_m)
+    p_aft_out = destination(p_aft[0], p_aft[1], offset_bearing, width_m)
+
+    for cycle in range(num_cycles):
+        c_num = cycle + 1
+        # Straight overflight leg directly over vessel
+        waypoints.append((p_aft[0], p_aft[1], alt, f"Race_C{c_num}_Inbound"))
+        waypoints.append((p_center[0], p_center[1], alt, f"Race_C{c_num}_Overflight"))
+        waypoints.append((p_fwd[0], p_fwd[1], alt, f"Race_C{c_num}_Outbound"))
+        # Racetrack return leg
+        waypoints.append((p_fwd_out[0], p_fwd_out[1], alt, f"Race_C{c_num}_TurnFwd"))
+        waypoints.append((p_mid_out[0], p_mid_out[1], alt, f"Race_C{c_num}_Downwind"))
+        waypoints.append((p_aft_out[0], p_aft_out[1], alt, f"Race_C{c_num}_TurnAft"))
+
+    return waypoints
+
+
+def reroute_around_closed_zone(waypoints: list[tuple[float, float, float, str]],
+                               c_lat: float,
+                               c_lon: float,
+                               radius_m: float,
+                               safe_buffer_m: float = 80.0,
+                               channel_center_lat: float = 71.988) -> tuple[list[tuple[float, float, float, str]], list[int]]:
+    """Reroute waypoints around a circular exclusion zone.
+
+    1. Removes waypoints located inside (radius_m + safe_buffer_m).
+    2. Identifies flight segments that penetrate the exclusion zone and inserts
+       tangent bypass detour waypoints skirting the navigable side of the channel.
+
+    Returns:
+        (rerouted_waypoints, invalidated_original_indices)
+    """
+    r_avoid = radius_m + safe_buffer_m
+    invalidated_indices = []
+
+    # Step 1: Filter out waypoints inside the avoidance zone
+    surviving: list[tuple[int, tuple[float, float, float, str]]] = []
+    for idx, wp in enumerate(waypoints):
+        wlat, wlon, walt, wname = wp
+        dist = distance_m(wlat, wlon, c_lat, c_lon)
+        if dist <= r_avoid:
+            invalidated_indices.append(idx)
+        else:
+            surviving.append((idx, wp))
+
+    if not surviving:
+        return [], invalidated_indices
+
+    # Determine preferred detour side (skirt towards channel centerline)
+    # If closed zone is North of channel center, bypass to the South (bearing ~180)
+    # If closed zone is South of channel center, bypass to the North (bearing ~0)
+    detour_bearing = 180.0 if c_lat >= channel_center_lat else 0.0
+
+    # Step 2: Build rerouted sequence, checking for penetrating legs
+    rerouted: list[tuple[float, float, float, str]] = [surviving[0][1]]
+
+    for i in range(len(surviving) - 1):
+        prev_idx, (lat1, lon1, alt1, name1) = surviving[i]
+        next_idx, (lat2, lon2, alt2, name2) = surviving[i + 1]
+
+        # Check if segment penetrates the exclusion zone
+        min_dist = segment_circle_dist_m(lat1, lon1, lat2, lon2, c_lat, c_lon)
+        if min_dist < r_avoid:
+            # Segment intersects! Insert detour waypoint around perimeter
+            # Compute detour waypoint along the safe perimeter
+            # Angle pointing from center toward the midpoint of the segment or towards channel
+            georef = Georef(c_lat, c_lon)
+            x1, y1, _ = georef.to_enu(lat1, lon1)
+            x2, y2, _ = georef.to_enu(lat2, lon2)
+            mid_x, mid_y = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+
+            # Detour offset direction: choose vector pointing away from center towards channel
+            mid_bearing = (math.degrees(math.atan2(mid_x, mid_y)) + 360.0) % 360.0
+            # Blend segment midpoint bearing with channel center preference
+            chosen_bearing = 0.5 * mid_bearing + 0.5 * detour_bearing
+            d_lat, d_lon = destination(c_lat, c_lon, chosen_bearing, r_avoid)
+            d_alt = (alt1 + alt2) / 2.0
+            d_name = f"Detour_CZ_{prev_idx+1}_{next_idx+1}"
+            rerouted.append((d_lat, d_lon, d_alt, d_name))
+
+        rerouted.append((lat2, lon2, alt2, name2))
+
+    return rerouted, invalidated_indices

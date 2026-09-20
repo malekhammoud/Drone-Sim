@@ -59,6 +59,8 @@ from arcticlib.geo import bearing_deg, destination, distance_m
 from arcticlib.geolocate import GeoConfig
 from arcticlib.tracks import TrackClient
 from tools.detect_verified import VerifiedDetector
+from tools.detect_verified_gps import draw_geolocated
+from tools.detect_verified import VerifiedDetector
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("quad_follow")
@@ -143,8 +145,122 @@ def build_parser() -> argparse.ArgumentParser:
     return ap
 
 
+def render_quad_video(frames_dir: str, sidecar_path: str, output_video_path: str,
+                      detector: Optional[VerifiedDetector] = None,
+                      geo: Optional[GeoConfig] = None,
+                      asset: str = ASSET, fps: float = 2.0,
+                      detections_path: Optional[str] = None) -> Optional[str]:
+    """Render annotated MP4 for quadcopter with HUD, detections, and GPS geolocation."""
+    if not os.path.exists(sidecar_path):
+        log.error("Sidecar not found: %s", sidecar_path)
+        return None
+    if detector is None:
+        detector = VerifiedDetector(model_path="models/patch_verifier.pt",
+                                    min_color_score=0.25, min_verify_prob=0.50,
+                                    enable_temporal=True, min_hits=8)
+    if geo is None:
+        geo = GeoConfig()
+
+    log.info("Rendering quadcopter MP4 video: %s", output_video_path)
+    entries = []
+    with open(sidecar_path) as f:
+        for line in f:
+            if line.strip():
+                entries.append(json.loads(line))
+    if not entries:
+        log.warning("No entries in sidecar file.")
+        return None
+
+    first_frame_path = os.path.join(frames_dir, os.path.basename(entries[0]["frame"]))
+    if not os.path.exists(first_frame_path):
+        log.error("First frame not found: %s", first_frame_path)
+        return None
+    first_img = cv2.imread(first_frame_path)
+    if first_img is None:
+        log.error("Cannot read first frame.")
+        return None
+
+    h, w = first_img.shape[:2]
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer = cv2.VideoWriter(output_video_path, fourcc, fps, (w, h))
+    total_frames = len(entries)
+
+    try:
+        for idx, entry in enumerate(entries):
+            frame_file = os.path.join(frames_dir, os.path.basename(entry["frame"]))
+            img = cv2.imread(frame_file)
+            if img is None:
+                continue
+
+            pose = entry.get("pose") or {}
+            intr = entry.get("camera") or {}
+            t_sim = entry.get("t_sim", 0.0)
+
+            candidates = detector.detect(img, frame_idx=idx + 1, t_sim=t_sim, pose=pose)
+            estimates = [geo.locate(c.cx, c.cy, pose, asset, intr) for c in candidates]
+            labels = []
+            for e in estimates:
+                if e is not None:
+                    labels.append(f"{e.lat:.5f},{e.lon:.5f} +/-{e.error_radius_m:.0f}m")
+                else:
+                    labels.append(None)
+
+            gt = entry.get("groundtruth") or {}
+            gt_pt = gt.get("point_px_approx") if isinstance(gt, dict) else None
+            vis = draw_geolocated(detector, img, candidates, labels=labels,
+                                  gt_pt=gt_pt if (gt_pt and 0 <= gt_pt[0] < w and 0 <= gt_pt[1] < h) else None)
+
+            alt_rel = pose.get("alt_rel", 0.0)
+            alt_amsl = pose.get("alt_amsl", 0.0)
+            roll = math.degrees(pose.get("roll", 0.0))
+            pitch = math.degrees(pose.get("pitch", 0.0))
+            yaw = math.degrees(pose.get("yaw", 0.0)) % 360.0
+            gps = entry.get("gps") or {}
+            agl = gps.get("agl_m", alt_rel)
+            mount_deg = entry.get("camera_mount_pitch_deg", math.degrees(geo.mount_pitch_rad(asset)))
+
+            # HUD Box in upper-left
+            cv2.rectangle(vis, (10, 10), (480, 170), (20, 20, 20), -1)
+            cv2.rectangle(vis, (10, 10), (480, 170), (80, 80, 80), 1)
+
+            cv2.putText(vis, "ARCTIC SURVEILLANCE - QUADCOPTER (TOP-DOWN)", (20, 32),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.52, (255, 255, 255), 2)
+            cv2.putText(vis, f"Sim Time: {t_sim:.1f}s | Frame: {idx+1}/{total_frames}", (20, 54),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
+            cv2.putText(vis, f"Alt: {agl:.1f}m AGL ({alt_amsl:.1f}m AMSL) | Yaw: {yaw:.0f} deg", (20, 74),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
+            cv2.putText(vis, f"Roll: {roll:+.1f} deg | Pitch: {pitch:+.1f} deg | Mount: {mount_deg:+.1f} deg", (20, 94),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
+            cv2.putText(vis, f"GPS: {gps.get('lat', pose.get('lat', 0.0)):.5f}, {gps.get('lon', pose.get('lon', 0.0)):.5f}", (20, 114),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (120, 220, 255), 1)
+
+            # Target status
+            confirmed = [c for c in candidates if getattr(c, "is_confirmed", False)]
+            if confirmed:
+                c0 = confirmed[0]
+                e0 = geo.locate(c0.cx, c0.cy, pose, asset, intr)
+                status = (f"TRACKING TARGET -> {e0.lat:.5f},{e0.lon:.5f} +/-{e0.error_radius_m:.0f}m"
+                          if e0 is not None else f"TRACKING TARGET #{getattr(c0, 'track_id', 1)}")
+                cv2.putText(vis, status, (20, 148), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (0, 255, 0), 2)
+            elif candidates:
+                c0 = candidates[0]
+                cv2.putText(vis, f"ACQUIRING CANDIDATE [{getattr(c0, 'hits', 1)}/8 hits]", (20, 148),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 165, 255), 1)
+            else:
+                cv2.putText(vis, "SEARCHING / HOLDING STANDOFF", (20, 148),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1)
+
+            writer.write(vis)
+    finally:
+        writer.release()
+
+    log.info("Finished rendering quadcopter MP4: %s", output_video_path)
+    return output_video_path
+
+
 def run_quad_follow(fleet: Fleet, target: tuple[float, float], args,
                     gt=None) -> dict:
+
     """Fly the quad to ``target`` and follow the ship. Returns run stats.
 
     Reuses the caller's :class:`Fleet` (so an orchestrator can keep the glider
@@ -295,8 +411,17 @@ def run_quad_follow(fleet: Fleet, target: tuple[float, float], args,
         det_f.close(); gps_f.close(); side_f.close()
 
     arr = np.asarray(truth_errs) if truth_errs else np.array([])
+    video_path = os.path.join(run_dir, f"quad_{stamp}.mp4")
+    try:
+        render_quad_video(frames_dir, os.path.join(run_dir, "sidecar.jsonl"), video_path,
+                          detector=detector, geo=geo, asset=args.asset, fps=args.hz,
+                          detections_path=os.path.join(run_dir, "detections.jsonl"))
+    except Exception as exc:
+        log.error("Failed to render quad video: %s", exc)
+        video_path = None
+
     result = {
-        "run_dir": run_dir, "n_frames": n_frames, "n_dets": n_dets, "n_geo": n_geo,
+        "run_dir": run_dir, "video_path": video_path, "n_frames": n_frames, "n_dets": n_dets, "n_geo": n_geo,
         "truth_errors": truth_errs,
         "median_error_m": float(np.median(arr)) if arr.size else None,
     }
@@ -306,6 +431,8 @@ def run_quad_follow(fleet: Fleet, target: tuple[float, float], args,
         print(f"Fix vs GROUND TRUTH: n={arr.size} median={np.median(arr):.1f} m "
               f"mean={arr.mean():.1f} m RMSE={np.sqrt((arr**2).mean()):.1f} m "
               f"within50m={100*np.mean(arr < 50):.0f}%")
+    if video_path:
+        print(f"Video MP4: {video_path}")
     print(f"Outputs: {run_dir}")
     print("=======================================================\n")
     return result

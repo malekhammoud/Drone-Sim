@@ -27,6 +27,24 @@ def _synthetic_scene() -> np.ndarray:
 
 
 class TestVerifiedDetector(unittest.TestCase):
+    def setUp(self):
+        self.model_path = MODEL
+
+    def test_end_to_end_real_frame(self):
+        if not os.path.exists(self.model_path):
+            self.skipTest(f"{self.model_path} not found")
+        frame_path = "patrol_run/2026-09-19T21-13-42/frames/00600.jpg"
+        if not os.path.exists(frame_path):
+            self.skipTest(f"{frame_path} not found")
+
+        detector = VerifiedDetector(model_path=self.model_path, min_color_score=0.25, min_verify_prob=0.30)
+        img = cv2.imread(frame_path)
+        detections = detector.detect(img)
+        self.assertGreaterEqual(len(detections), 1, "Should detect vessel in real frame")
+        top = detections[0]
+        self.assertTrue(top.contains(313.8, 264.4, margin=15.0))
+        self.assertGreater(top.score, 0.50)
+
     def test_stage1_finds_synthetic_boat(self):
         det = ColorAnomalyDetector(min_area=2, max_area=800, min_score=0.25)
         cands = det.detect(_synthetic_scene())
