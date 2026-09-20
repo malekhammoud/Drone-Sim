@@ -107,7 +107,8 @@ def search_for_ship(fleet: Fleet, args, gt=None) -> dict:
                 time.sleep(0.05)
                 continue
             pose = fleet.pose_at(asset, frame.t_sim, clock="sim") or fleet.pose(asset)
-            dets = detector.detect(frame.image)
+            dets = detector.detect(frame.image, frame_idx=idx, t_sim=frame.t_sim,
+                                   pose=pose, cam_intrinsics=intr)
             for c in dets:
                 e = geo.locate(c.cx, c.cy, pose, asset, intr)
                 if e is None:

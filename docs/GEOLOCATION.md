@@ -4,6 +4,29 @@
 from the camera through the pixel, rotating it into NED, intersecting flat
 ground, and converting the horizontal offset to lat/lon with a WGS84 geodesic.
 
+## Integration with the 3-stage detector (merged)
+
+The GPS tools are wired into the merged detector pipeline
+(`tools/detect_verified.py`: **Step 1** color anomaly → **Step 2** CNN verifier
+with the trained `models/patch_verifier.pt` → **Step 3** temporal persistence):
+
+* `tools/detect_verified_gps.py` imports `VerifiedDetector` from
+  `tools/detect_verified` (no duplicated copy) and drives it with temporal
+  context (`frame_idx`, `t_sim`, `pose`, `cam_intrinsics`), then geolocates every
+  surviving hit with `arcticlib.geolocate` and overlays lat/lon labels.
+* `tools/detect_verified.pixel_to_latlon` (used by the detector's geo-mode
+  temporal association) now delegates to the trig geolocator instead of the old
+  flat-earth approximation.
+* `tools/patrol_and_record_gps.py` is rebuilt on the remote patrol rework (safe
+  3-tier strait waypoints + 3-stage detector) with the GPS recording,
+  `detections.jsonl`, `tracks.jsonl` and HUD annotations re-applied.
+* `tools/quad_follow_ship.py` and `tools/two_step_mission.py` feed the temporal
+  filter the same per-frame context.
+
+On the ground-truth dataset (`tools/gt_runs/2026-09-19T21-26-43`) the merged
+pipeline produced a single fused ship track of **244 hits over 190 frames**
+(mean score 0.76), and the CNN cut Stage-1 false positives by ~97%.
+
 ## Where it is wired in
 
 | File | Role |

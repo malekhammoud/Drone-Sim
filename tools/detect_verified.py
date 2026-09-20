@@ -339,40 +339,23 @@ class VerifiedDetector:
 # --------------------------------------------------------------------------- #
 # Geolocation Helper: Camera Ray -> Flat Earth Intersection
 # --------------------------------------------------------------------------- #
-def pixel_to_latlon(u: float, v: float, pose, camera_intrinsics: dict, georef) -> Optional[Tuple[float, float]]:
-    """Estimate lat/lon by intersecting camera ray with sea level (z=0)."""
-    if pose is None or pose.alt_amsl <= 0.5:
+def pixel_to_latlon(u: float, v: float, pose, camera_intrinsics: dict,
+                    georef=None) -> Optional[Tuple[float, float]]:
+    """Estimate lat/lon with the trig geolocator (:mod:`arcticlib.geolocate`).
+
+    Casts a ray through the pixel, rotates it into NED using the airframe
+    attitude and the asset's true camera mount (from the sensor SDF), intersects
+    flat ground and converts to lat/lon. ``georef`` is accepted for backwards
+    compatibility and ignored (the geodesic is global).
+    """
+    if pose is None:
         return None
-
-    # Camera ray in camera frame (+Z forward, +X right, +Y down)
-    fx = camera_intrinsics["fx"]
-    fy = camera_intrinsics["fy"]
-    cx = camera_intrinsics["cx"]
-    cy = camera_intrinsics["cy"]
-
-    ray_c = np.array([(u - cx) / fx, (v - cy) / fy, 1.0], dtype=np.float64)
-    ray_c /= np.linalg.norm(ray_c)
-
-    # Attitude: roll, pitch, yaw (yaw is true heading, convert to grid yaw)
-    # Camera fixed looking down/forward
-    # For quadcopter with fixed camera: looks down (approx pitch -90 deg or along body)
-    # If ray points down (dz < 0), intersect with z = 0
-    # Approximate using flat earth distance:
-    alt = pose.alt_amsl
-    # Pitch down angle
-    pitch = pose.pitch
-    yaw = pose.yaw
-    # Approximate horizontal distance:
-    # theta is angle from nadir
-    theta = math.atan2(np.hypot(ray_c[0], ray_c[1]), ray_c[2])
-    dist_horiz = alt * math.tan(theta)
-
-    # Bearing from vehicle
-    bearing_rel = math.atan2(ray_c[0], ray_c[2])
-    bearing_true = (math.degrees(yaw + bearing_rel) + 360.0) % 360.0
-
-    from arcticlib.geo import destination
-    return destination(pose.lat, pose.lon, bearing_true, dist_horiz)
+    from arcticlib.geolocate import GeoConfig
+    asset = getattr(pose, "asset", "fixed-wing")
+    est = GeoConfig().locate(u, v, pose, asset, camera_intrinsics)
+    if est is None:
+        return None
+    return est.lat, est.lon
 
 
 def main() -> int:

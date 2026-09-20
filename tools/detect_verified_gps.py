@@ -41,108 +41,29 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import cv2
 import numpy as np
-import torch
 
 from arcticlib.geo import distance_m
 from arcticlib.geolocate import (GeoConfig, intrinsics_from_fov, project_to_pixel,
                                  refine_tracks)
 from tools.detect_color import Candidate, ColorAnomalyDetector
-from tools.train_patch_verifier import PatchVerifierCNN
+from tools.detect_verified import VerifiedDetector
 
 log = logging.getLogger("detect_verified_gps")
 
 
-class VerifiedDetector:
-    """Combines Step 1 (Color Anomaly) and Step 2 (CNN Verifier)."""
-
-    def __init__(self,
-                 model_path: Optional[str] = "models/patch_verifier.pt",
-                 min_color_score: float = 0.30,
-                 min_verify_prob: float = 0.50,
-                 patch_size: int = 48,
-                 device: Optional[str] = None):
-        self.color_detector = ColorAnomalyDetector(
-            min_area=2, max_area=800, min_score=min_color_score,
-            patch_size=patch_size
-        )
-        self.min_verify_prob = min_verify_prob
-        self.patch_size = patch_size
-
-        if device is None:
-            if torch.backends.mps.is_available():
-                self.device = torch.device("mps")
-            elif torch.cuda.is_available():
-                self.device = torch.device("cuda")
-            else:
-                self.device = torch.device("cpu")
-        else:
-            self.device = torch.device(device)
-
-        self.model: Optional[PatchVerifierCNN] = None
-        if model_path and os.path.exists(model_path):
-            self.model = PatchVerifierCNN(patch_size=patch_size, num_classes=2)
-            self.model.load_state_dict(torch.load(model_path, map_location=self.device, weights_only=True))
-            self.model.to(self.device)
-            self.model.eval()
-            print(f"Loaded patch verifier model from {model_path} onto {self.device}")
-        else:
-            print("Warning: No model loaded; running in Stage 1 only mode.")
-
-    def detect(self, bgr: np.ndarray) -> list[Candidate]:
-        """Run two-stage detection on a BGR image."""
-        candidates = self.color_detector.detect(bgr, extract_patches=True)
-        if not candidates or self.model is None:
-            return candidates
-
-        valid_indices = []
-        batch_tensors = []
-        for i, c in enumerate(candidates):
-            if c.patch is not None and c.patch.shape == (self.patch_size, self.patch_size, 3):
-                tensor = torch.from_numpy(c.patch.transpose(2, 0, 1)).float() / 255.0
-                tensor = (tensor - 0.5) / 0.5
-                batch_tensors.append(tensor)
-                valid_indices.append(i)
-
-        if not batch_tensors:
-            return candidates
-
-        batch = torch.stack(batch_tensors).to(self.device)
-        with torch.no_grad():
-            probs = self.model.predict_prob(batch).cpu().numpy()
-
-        verified: list[Candidate] = []
-        for idx, prob in zip(valid_indices, probs):
-            c = candidates[idx]
-            p = float(prob)
-            if p >= self.min_verify_prob:
-                c.score = float(0.40 * c.score + 0.60 * p)
-                verified.append(c)
-
-        verified.sort(key=lambda c: c.score, reverse=True)
-        return verified
-
-    def draw_detections(self, bgr: np.ndarray, candidates: list[Candidate],
-                        gt_pt: Optional[tuple[float, float]] = None,
-                        labels: Optional[list[Optional[str]]] = None) -> np.ndarray:
-        vis = bgr.copy()
-
-        if gt_pt is not None:
-            gx, gy = int(round(gt_pt[0])), int(round(gt_pt[1]))
-            cv2.circle(vis, (gx, gy), 12, (0, 255, 0), 2)
-            cv2.putText(vis, "TRUE BOAT", (gx + 15, gy + 5),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-
+def draw_geolocated(detector: VerifiedDetector, bgr: np.ndarray,
+                    candidates: list[Candidate],
+                    labels: Optional[list[Optional[str]]] = None,
+                    gt_pt: Optional[tuple[float, float]] = None) -> np.ndarray:
+    """Draw the 3-stage detector's boxes, then overlay geolocation labels."""
+    vis = detector.draw_detections(bgr, candidates, gt_pt=gt_pt)
+    if labels:
         for idx, c in enumerate(candidates):
-            color = (0, 255, 0) if idx == 0 else (0, 165, 255)
-            cv2.rectangle(vis, (c.x, c.y), (c.x + c.w, c.y + c.h), color, 2)
-            label = f"BOAT #{idx+1} {c.score:.2f}"
-            cv2.putText(vis, label, (c.x, max(12, c.y - 4)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 2)
-            if labels is not None and idx < len(labels) and labels[idx]:
-                cv2.putText(vis, labels[idx], (c.x, min(vis.shape[0] - 4, c.y + c.h + 14)),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.42, color, 1)
-
-        return vis
+            if idx < len(labels) and labels[idx]:
+                cv2.putText(vis, labels[idx],
+                            (c.x, min(vis.shape[0] - 4, c.y + c.h + 14)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 0, 255), 1)
+    return vis
 
 
 # --------------------------------------------------------------------------- #
@@ -172,9 +93,15 @@ def _label(est) -> Optional[str]:
 
 
 def _geolocate_all(detector: VerifiedDetector, geo: GeoConfig, image: np.ndarray,
-                   pose, asset: str, intrinsics: dict):
-    """Detect, geolocate every candidate, return (dets, estimates, labels)."""
-    dets = detector.detect(image)
+                   pose, asset: str, intrinsics: dict,
+                   frame_idx: Optional[int] = None, t_sim: Optional[float] = None):
+    """Run the 3-stage detector with temporal context, then geolocate each hit.
+
+    Stage 3 (temporal persistence) associates candidates across frames in pixel
+    space; every surviving candidate is then geolocated with the trig pipeline.
+    """
+    dets = detector.detect(image, frame_idx=frame_idx, t_sim=t_sim,
+                           pose=pose, cam_intrinsics=intrinsics)
     estimates = [geo.locate(c.cx, c.cy, pose, asset, intrinsics) for c in dets]
     labels = [_label(e) for e in estimates]
     return dets, estimates, labels
@@ -232,7 +159,9 @@ def evaluate_dataset_gps(dataset_dir: str, asset: str, detector: VerifiedDetecto
                     continue
                 pose = data.get("pose")
                 intr = data.get("camera") or {}
-                dets, estimates, labels = _geolocate_all(detector, geo, img, pose, asset, intr)
+                dets, estimates, labels = _geolocate_all(
+                    detector, geo, img, pose, asset, intr,
+                    frame_idx=data.get("index"), t_sim=data.get("t_sim"))
                 frames += 1
                 total_dets += len(dets)
                 for c, e in zip(dets, estimates):
@@ -282,10 +211,9 @@ def evaluate_dataset_gps(dataset_dir: str, asset: str, detector: VerifiedDetecto
                             truth_radii.append(estimates[k].error_radius_m)
 
                 if out_dir:
-                    vis = detector.draw_detections(
-                        img, dets,
-                        gt_pt=(gt_pt[0], gt_pt[1]) if gt_pt else None,
-                        labels=labels)
+                    vis = draw_geolocated(
+                        detector, img, dets, labels=labels,
+                        gt_pt=(gt_pt[0], gt_pt[1]) if gt_pt else None)
                     cv2.imwrite(os.path.join(out_dir, f"det_{os.path.basename(frame_path)}"), vis)
     finally:
         if det_file is not None:
@@ -418,6 +346,14 @@ def main() -> int:
                         help="Min distinct frames to call a fused track (default 2)")
     parser.add_argument("--no-fuse", action="store_true",
                         help="Disable multi-frame refinement (per-frame fixes only)")
+    parser.add_argument("--no-temporal", action="store_true",
+                        help="Disable the Stage 3 temporal persistence filter")
+    parser.add_argument("--min-hits", type=int, default=8,
+                        help="Temporal hits needed to confirm a track (default 8)")
+    parser.add_argument("--max-misses", type=int, default=4,
+                        help="Temporal misses before a track is dropped (default 4)")
+    parser.add_argument("--track-mode", choices=["pixel", "geo"], default="pixel",
+                        help="Stage 3 association space (default pixel)")
     # Single-image pose (all angles in degrees).
     parser.add_argument("--lat", type=float, default=None)
     parser.add_argument("--lon", type=float, default=None)
@@ -429,7 +365,12 @@ def main() -> int:
     args = parser.parse_args()
 
     geo = _geo_from_args(args)
-    detector = VerifiedDetector(model_path=args.model)
+    detector = VerifiedDetector(
+        model_path=args.model,
+        enable_temporal=not args.no_temporal,
+        min_hits=args.min_hits,
+        max_misses=args.max_misses,
+        track_mode=args.track_mode)
 
     if args.image:
         img = cv2.imread(args.image)
@@ -467,7 +408,7 @@ def main() -> int:
             print(line)
         if args.out_dir:
             os.makedirs(args.out_dir, exist_ok=True)
-            vis = detector.draw_detections(img, dets, labels=labels)
+            vis = draw_geolocated(detector, img, dets, labels=labels)
             out_path = os.path.join(args.out_dir, f"verified_{os.path.basename(args.image)}")
             cv2.imwrite(out_path, vis)
             print(f"Saved visualization to {out_path}")
@@ -499,14 +440,17 @@ def main() -> int:
         period = 1.0 / max(args.hz, 0.1)
         print(f"Live verified+GEO detector on {args.asset} at {args.hz} Hz "
               f"(camera mount {mount:.2f} deg, alt_ref={geo.alt_ref})...")
+        frame_idx = 0
         try:
             while True:
                 t0 = time.monotonic()
                 frame = cam.grab()
                 if frame is not None:
                     pose = fleet.pose_at(args.asset, frame.t_sim, clock="sim") or fleet.pose(args.asset)
-                    dets, estimates, labels = _geolocate_all(detector, geo, frame.image,
-                                                             pose, args.asset, intr)
+                    dets, estimates, labels = _geolocate_all(
+                        detector, geo, frame.image, pose, args.asset, intr,
+                        frame_idx=frame_idx, t_sim=frame.t_sim)
+                    frame_idx += 1
 
                     status = f"[{time.strftime('%H:%M:%S')}] Detections: {len(dets)}"
                     if dets:
@@ -526,7 +470,7 @@ def main() -> int:
 
                     if args.out_dir:
                         os.makedirs(args.out_dir, exist_ok=True)
-                        vis = detector.draw_detections(frame.image, dets, labels=labels)
+                        vis = draw_geolocated(detector, frame.image, dets, labels=labels)
                         cv2.imwrite(os.path.join(args.out_dir, "latest_live_detection.jpg"), vis)
 
                 dt = time.monotonic() - t0

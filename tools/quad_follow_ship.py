@@ -215,7 +215,8 @@ def run_quad_follow(fleet: Fleet, target: tuple[float, float], args,
 
             truth = gt.ship_latlon() if gt is not None else None
 
-            dets = detector.detect(frame.image)
+            dets = detector.detect(frame.image, frame_idx=frame_idx, t_sim=frame.t_sim,
+                                   pose=pose, cam_intrinsics=intr)
             estimates = [geo.locate(c.cx, c.cy, pose, args.asset, intr) for c in dets]
             best_i = None
             for i, e in enumerate(estimates):
