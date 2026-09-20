@@ -8,9 +8,12 @@ data/
 config.yaml
 patrol_run/
 patrol_output/
+gt_runs/
+quad_runs/
 debug_live_snap/
 terrain_tile.jpg
 terrain_mosaic.jpg
 *.mp4
 patrol_plan*.png
 models/
+two_step_runs/

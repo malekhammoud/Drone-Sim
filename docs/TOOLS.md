@@ -159,7 +159,7 @@ arrow keys fly, `W/S` climb, `A/D` yaw, `T` takeoff, `L` land, `Space` stop,
 
 ```bash
 ./fly.sh
-./fly.sh --master=udpout:10.99.1.1:14550 --max-speed=2
+./fly.sh --master=udpout:127.0.0.1:14550 --max-speed=2
 ./fly.sh --self-test                     # scripted takeoff/fly/land check
 ```
 
@@ -168,7 +168,7 @@ arrow keys fly, `W/S` climb, `A/D` yaw, `T` takeoff, `L` land, `Space` stop,
 ## `./test_mavproxy.sh` — MAVProxy smoke test
 
 Reproduces the original setup check: runs
-`mavproxy.py --master=udpout:10.99.1.1:14550`, feeds it `exit`, and reports PASS
+`mavproxy.py --master=udpout:127.0.0.1:14550`, feeds it `exit`, and reports PASS
 if MAVProxy starts and opens the link.
 
 ```bash

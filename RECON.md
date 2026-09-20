@@ -1,6 +1,6 @@
 # RECON — ArcticSim infrastructure (Phase 0)
 
-Recon as of the live WireGuard sim. **Sources:** the real upstream repo
+Recon of the ArcticSim stack (now run locally). **Sources:** the real upstream repo
 (`github.com/Dominion-Dynamics/arctic-sim`, cloned to `/tmp/opencode/arctic-sim`),
 the running sim APIs, and live MAVLink/camera/track probes. The competition
 slides are `/home/malek/Downloads/ArcticSim.pdf`.
@@ -31,9 +31,9 @@ site centre; a right-click in the UI yields world `x y z` and true `lat lon`.
 | `tower-2` | 10.23.0.104 | ArduPilot AntennaTracker |
 | `rover` | 10.23.0.105 | ArduRover skid-steer (not rostered here) |
 
-**Reachable from our WireGuard client at `10.99.1.1`** (tunnel peer;
-`10.99.1.0/24`, our addr `10.99.1.4`). Assets are reached on the host-published
-ports. Rule from the repo: *page host + asset host port*.
+**Reachable at `127.0.0.1`** on the local `docker compose` deployment (set
+`ARCTICSIM_HOST` to target a remote sim). Assets are reached on the
+host-published ports. Rule from the repo: *page host + asset host port*.
 
 Protocols: ArduPilot over **MAVLink** (UDP `udpin` listeners + TCP), **MJPEG/HTTP**
 cameras, **gzweb WebSocket** (Gazebo transport) for sim time/poses, **HTTP/JSON**
@@ -55,7 +55,7 @@ Ports are `8600 + 10*slot` **on the sim host** (not per asset), proven live:
 
 | asset | camera | URL | verified |
 |---|---|---|---|
-| quadcopter | gimbal | `http://10.99.1.1:8600/snapshot.jpg` | 66 KB JPEG |
+| quadcopter | gimbal | `http://127.0.0.1:8600/snapshot.jpg` | 66 KB JPEG |
 | fixed-wing | FPV | `:8610` | 28 KB JPEG |
 | tower-1 | EO | `:8630` | 30 KB JPEG |
 | tower-2 | EO | `:8640` | 39 KB JPEG |
@@ -97,9 +97,10 @@ camera fog rendering is currently buggy.
   `lon_0=-45°`, WGS84) with `cx,cy` = centre of `/api/site` `bounds3413`.
   `convergence_deg≈-49.80` at Fort Ross. World `(0,0)` is the site centre.
 
-### Discrepancy vs the prompt
-`10.99.0.1` (slides) is a **different** sim instance's WireGuard subnet. **Ours is
-`10.99.1.1`** — that is where the track API (`:8010`) and everything else answers.
+### Host
+The sim now runs **locally** (`127.0.0.1`); the old WireGuard/VM addresses
+(`10.99.x.x`) in earlier notes no longer apply. The container network stays
+`10.23.0.0/24` internally.
 
 ### Sim health caveat (observed live)
 The sim's assets can get into a state where SITL is healthy but Gazebo does not
@@ -122,10 +123,10 @@ ports**; host ports are strided. `SYSID_THISMAV = slot+1`. Endpoints are MAVProx
 
 | asset | our endpoint | sysid | type | autopilot | mode now | armed |
 |---|---|---|---|---|---|---|
-| quadcopter | `udpout:10.99.1.1:14550` | 1 | QUADROTOR | ArduCopter | GUIDED | yes |
-| fixed-wing | `udpout:10.99.1.1:14560` | 2 | FIXED_WING | ArduPlane | GUIDED | yes |
-| tower-1 | `udpout:10.99.1.1:14580` | 4 | ANTENNA_TRACKER | AntennaTracker | MANUAL | yes |
-| tower-2 | `udpout:10.99.1.1:14590` | 5 | ANTENNA_TRACKER | AntennaTracker | MANUAL | yes |
+| quadcopter | `udpout:127.0.0.1:14550` | 1 | QUADROTOR | ArduCopter | GUIDED | yes |
+| fixed-wing | `udpout:127.0.0.1:14560` | 2 | FIXED_WING | ArduPlane | GUIDED | yes |
+| tower-1 | `udpout:127.0.0.1:14580` | 4 | ANTENNA_TRACKER | AntennaTracker | MANUAL | yes |
+| tower-2 | `udpout:127.0.0.1:14590` | 5 | ANTENNA_TRACKER | AntennaTracker | MANUAL | yes |
 
 (rover 14600 sysid 6; boat 14570 reserved.)
 
@@ -165,7 +166,7 @@ steps while someone is connected. Our connections literally drive the sim.
 
 ## 5. Track submission API
 
-`http://10.99.1.1:8010/api/tracks`. Verified create/update/list:
+`http://127.0.0.1:8010/api/tracks`. Verified create/update/list:
 
 - `POST {"name","lat","lon"}` → `{"ok":true,"created":true,"name","uuid","lat","lon","timestamp"}`
 - `POST {"name",...,"heading","speed"}` → `created:false`, updates, bumps `fixes`

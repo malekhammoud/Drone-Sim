@@ -6,10 +6,10 @@ responsibility lives. Measured sim facts live in [`../RECON.md`](../RECON.md).
 ## The system in one picture
 
 ```
-                    WireGuard tunnel (10.99.1.0/24, we are 10.99.1.4)
+                    local docker compose (host 127.0.0.1)
                                     │
                     ┌───────────────┴────────────────┐
-                    │        ArcticSim server 10.99.1.1
+                    │        ArcticSim server 127.0.0.1
                     │                                │
    MAVLink (UDP)    │  quadcopter  :14550  sysid 1   │
    ◄────────────────┤  fixed-wing  :14560  sysid 2   │
