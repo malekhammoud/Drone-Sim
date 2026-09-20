@@ -9,6 +9,7 @@ Usage:
     python tools/plot_patrol_plan.py --out patrol_plan.png
     python tools/plot_patrol_plan.py --closed-zone 71.995,-94.810,800
     python tools/plot_patrol_plan.py --intercept 71.985,-94.750
+    python tools/plot_patrol_plan.py --ai-event "Attack reported near 71.995, -94.810! Close off the zone with an 800m radius."
 """
 from __future__ import annotations
 
@@ -31,6 +32,7 @@ import numpy as np
 from arcticlib.config import load_config
 from arcticlib.geo import Georef, destination, distance_m
 from tools.patrol_and_record import generate_hotdog_waypoints
+from ollama_control import query_tether  # NEW
 
 
 def deg2num(lat_deg: float, lon_deg: float, zoom: int) -> tuple[int, int]:
@@ -80,6 +82,45 @@ def fetch_satellite_mosaic(center_lat: float, center_lon: float, zoom: int = 12
     bottom_lat, right_lon = num2deg(cx + 2, cy + 2, zoom)
     return mosaic_rgb, top_lat, bottom_lat, left_lon, right_lon
 
+# NEW: translates a natural-language --ai-event into the existing --closed-zone
+# / --intercept args, so nothing downstream needs to know the AI was involved.
+def resolve_ai_event(args: argparse.Namespace) -> None:
+    print(f"Querying AI supervisor: {args.ai_event!r}")
+    decision = query_tether(args.ai_event)
+
+    if decision is None:
+        print("AI supervisor returned no valid decision — proceeding without an overlay.")
+        return
+
+    action = decision.get("action")
+    lat = decision.get("lat")
+    lon = decision.get("lon")
+    reason = decision.get("reason", "")
+
+    valid_coords = (
+        isinstance(lat, (int, float)) and isinstance(lon, (int, float))
+        and -90 <= lat <= 90 and -180 <= lon <= 180
+    )
+
+    print(f"AI decision: {action} at ({lat}, {lon}) — {reason}")
+
+    if not valid_coords and action in ("CLOSED_ZONE", "INTERCEPT"):
+        print(f"AI returned invalid or missing coordinates for action '{action}' — skipping overlay.")
+        return
+
+    if action == "CLOSED_ZONE":
+        radius = decision.get("radius_m", 500)
+        if not isinstance(radius, (int, float)) or radius <= 0:
+            print(f"AI returned invalid radius_m ({radius!r}) — defaulting to 500m.")
+            radius = 500
+        args.closed_zone = f"{lat},{lon},{radius}"
+    elif action == "INTERCEPT":
+        args.intercept = f"{lat},{lon}"
+    elif action == "ABORT":
+        print("AI supervisor returned ABORT — no overlay will be drawn.")
+    else:
+        print(f"Unrecognized action '{action}' — skipping overlay.")
+
 
 def main() -> int:
     parser = argparse.ArgumentParser()
@@ -91,7 +132,13 @@ def main() -> int:
                         help="Closed zone overlay formatted as 'lat,lon,radius_m' (e.g., '71.995,-94.810,800')")
     parser.add_argument("--intercept", type=str, default=None,
                         help="Dynamic intercept coordinate target as 'lat,lon' (e.g., '71.985,-94.750')")
+    parser.add_argument("--ai-event", type=str, default=None,  # NEW
+                        help="Natural-language tactical event description, routed through the AI supervisor "
+                             "to decide the overlay (e.g., 'Unknown attack reported near tower 1')")
     args = parser.parse_args()
+
+    if args.ai_event:  # NEW — only runs if the flag is passed; otherwise behaves exactly as before
+        resolve_ai_event(args)
 
     cfg = load_config()
     georef = Georef(cfg.origin_lat, cfg.origin_lon, ps_centre_x=cfg.ps_centre_x, ps_centre_y=cfg.ps_centre_y)
@@ -144,13 +191,13 @@ def main() -> int:
             ax.plot(s_lons[-1], s_lats[-1], "cs", markersize=10, label="Ship Current Area")
 
     # --- EDGE CASE OVERLAYS ---
-    
+
     # Edge Case 1: Closed-off / Restricted Exclusion Zone
     if args.closed_zone:
         try:
             cz_lat_str, cz_lon_str, cz_rad_str = args.closed_zone.split(",")
             cz_lat, cz_lon, cz_radius_m = float(cz_lat_str), float(cz_lon_str), float(cz_rad_str)
-            
+
             # Approximate meters to degrees for map rendering
             deg_radius_lat = cz_radius_m / 111000.0
             deg_radius_lon = cz_radius_m / (111000.0 * math.cos(math.radians(cz_lat)))
@@ -161,7 +208,7 @@ def main() -> int:
             )
             ax.add_patch(circle)
             ax.plot(cz_lon, cz_lat, "rx", markersize=12, markeredgewidth=2)
-            
+
             # Highlight invalidated waypoints in red
             for idx, (wlat, wlon, _, name) in enumerate(waypoints):
                 if distance_m(wlat, wlon, cz_lat, cz_lon) <= cz_radius_m:
@@ -177,12 +224,12 @@ def main() -> int:
         try:
             it_lat_str, it_lon_str = args.intercept.split(",")
             it_lat, it_lon = float(it_lat_str), float(it_lon_str)
-            
+
             ax.plot(it_lon, it_lat, "m*", markersize=16, label="Tether Intercept Target", markeredgecolor="white")
             ax.annotate("EMERGENCY TARGET", (it_lon, it_lat), textcoords="offset points", xytext=(10, -10),
                         color="magenta", fontsize=10, fontweight="bold",
                         bbox=dict(boxstyle="round,pad=0.3", fc="black", alpha=0.85))
-            
+
             # Plot dynamic detour line from aircraft start to intercept point
             ax.plot([plane_start[1], it_lon], [plane_start[0], it_lat], color="magenta", linestyle=":", linewidth=2.5)
         except Exception as err:

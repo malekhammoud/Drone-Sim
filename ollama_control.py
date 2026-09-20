@@ -2,8 +2,8 @@ import json
 import urllib.request
 from typing import Optional, Dict, Any
 
-def query_tether(prompt: str, api_url: str = "http://localhost:11434/v1/chat/completions", model: str = "llama3") -> Optional[Dict[str, Any]]:
-    """Query local Tether model for tactical edge-case decision making."""
+def query_tether(prompt: str, api_url: str = "http://localhost:11434/v1/chat/completions", model: str = "llama3.2:1b") -> Optional[Dict[str, Any]]:
+    """Query local Ollama model for tactical edge-case decision making."""
     system_prompt = (
         "You are an autonomous UAV tactical supervisor in the Arctic. "
         "Analyze operator console inputs or tactical events (e.g., active attacks, closed zones). "
@@ -36,7 +36,7 @@ def query_tether(prompt: str, api_url: str = "http://localhost:11434/v1/chat/com
     )
 
     try:
-        with urllib.request.urlopen(req, timeout=5) as resp:
+        with urllib.request.urlopen(req, timeout=30) as resp:
             data = json.loads(resp.read().decode("utf-8"))
             content = data["choices"][0]["message"]["content"]
             return json.loads(content)
