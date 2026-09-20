@@ -77,7 +77,22 @@ tools/
   record.py         labelled dataset recorder (JPEG + JSONL sidecar)
   dashboard_cli.py  live terminal ENU map + status table
   calibrate_tower.py  verify/write calib/tower_<name>.json
-tests/          unit tests for geo and pose interpolation
+  tower_scan.py     pan/tilt tower watch: sweep, detect, triangulate a boat tip
+tests/          unit tests for geo, pose interpolation and tower geometry
+```
+
+## Tower watch
+
+`main.py` runs a background **tower watch** (`tools/tower_scan.py`): both masts
+sweep back and forth across the strait, run the same CV the wing does, and
+geolocate any boat. A confirmed sighting is a *tip* — a triangulated point when
+two masts cross, otherwise a bearing line plus a search area. The wing abandons
+its search pattern, flies to the tip and looks for itself; a confirmed sighting
+becomes the quad handoff, a dry hole resumes the normal patrol. Towers never fly,
+so `--no-tower-scan` turns the whole phase off. Sweep it standalone with:
+
+```bash
+python tools/tower_scan.py --duration 60
 ```
 
 ## Tests

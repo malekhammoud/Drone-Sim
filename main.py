@@ -139,6 +139,15 @@ def build_parser() -> argparse.ArgumentParser:
                     help="desired ship depression at the quad, deg")
     ap.add_argument("--update-period", type=float, default=4.0, help="quad re-aim period, s")
     ap.add_argument("--takeoff-timeout", type=float, default=150.0)
+    # Tower watch (phase 0, runs alongside phase 1)
+    ap.add_argument("--no-tower-scan", action="store_true",
+                    help="disable the pan/tilt tower watch")
+    ap.add_argument("--tower-investigate-duration", type=float, default=45.0,
+                    help="seconds the wing spends checking a tower tip")
+    ap.add_argument("--tower-contact-ttl", type=float, default=20.0,
+                    help="seconds a tower contact stays fresh")
+    ap.add_argument("--tower-min-confirm", type=int, default=1,
+                    help="confirmed hits before a tower contact counts")
     # Handoff
     ap.add_argument("--skip-patrol", action="store_true", help="skip phase 1")
     ap.add_argument("--lat", type=float, default=None)
@@ -193,6 +202,19 @@ def main() -> int:
         except Exception:
             gt = None
 
+    # Phase 0 — tower watch, in the background. It sweeps both masts for boats
+    # and the wing diverts to any confirmed contact it reports.
+    watch = None
+    if not args.no_tower_scan and not args.skip_patrol and not args.follow_ship:
+        try:
+            from tools.tower_scan import TowerWatch
+            watch = TowerWatch(fleet, cfg, contact_ttl_s=args.tower_contact_ttl,
+                               min_confirm=args.tower_min_confirm)
+            watch.start()
+        except Exception as exc:
+            log.warning("Tower watch disabled: %s", exc)
+            watch = None
+
     try:
         # -- Resolve the handoff target ----------------------------------- #
         target = None
@@ -209,7 +231,9 @@ def main() -> int:
         if target is None and not args.skip_patrol:
             log.info("========== PHASE 1: WING PATROL + CV + GPS ==========")
             try:
-                res = run_patrol(fleet, _patrol_ns(args), gt=gt)
+                res = run_patrol(fleet, _patrol_ns(args), gt=gt,
+                                 tip_provider=watch,
+                                 tip_duration=args.tower_investigate_duration)
             except RuntimeError as exc:
                 log.error("Wing patrol failed: %s", exc)
                 return 1
@@ -234,6 +258,8 @@ def main() -> int:
         log.info("Mission complete: wing + quad + GPS + 3-stage CV.")
         return 0
     finally:
+        if watch is not None:
+            watch.stop()
         if gt is not None:
             gt.stop()
         fleet.shutdown()

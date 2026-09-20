@@ -275,11 +275,20 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def run_patrol(fleet: Fleet, args, geo: Optional[GeoConfig] = None, gt=None) -> dict:
+def run_patrol(fleet: Fleet, args, geo: Optional[GeoConfig] = None, gt=None,
+               tip_provider=None, tip_duration: float = 45.0,
+               tip_min_hits: int = 3) -> dict:
     """Fly the wing patrol (or chase the ship), record GPS + frames, render.
 
     Reuses the caller's :class:`Fleet` and optional ``GroundTruth``; does not
     shut them down. Returns paths plus the fused tracks and best handoff target.
+
+    ``tip_provider`` is any object exposing ``latest_tip()`` and
+    ``search_point(tip)`` — in the full mission this is a
+    :class:`tools.tower_scan.TowerWatch`. When it reports a boat the wing
+    abandons the search pattern, flies straight to the tip and looks for itself
+    for ``tip_duration`` seconds. A confirmed sighting becomes the handoff
+    target; a dry hole hands control back to the normal waypoints.
     """
     cfg = fleet.config
     georef = Georef(cfg.origin_lat, cfg.origin_lon, ps_centre_x=cfg.ps_centre_x,
@@ -353,6 +362,20 @@ def run_patrol(fleet: Fleet, args, geo: Optional[GeoConfig] = None, gt=None) -> 
     frame_idx = 0
     last_goto_time = 0.0
 
+    # Tower tip handling. A background TowerWatch hands us a boat sighting; the
+    # wing abandons the search pattern, investigates, and either confirms (a
+    # handoff target) or resumes the normal waypoints.
+    tip_live = None
+    if tip_provider is not None and not args.no_fly and not args.follow_ship:
+        tip_live = VerifiedDetector(model_path=args.model, min_color_score=0.25,
+                                    min_verify_prob=0.50,
+                                    enable_temporal=not args.no_temporal,
+                                    min_hits=tip_min_hits, max_misses=4)
+    tip_seen: set[str] = set()
+    tip_active = False
+    tip_deadline = 0.0
+    tip_target = None
+
     try:
         if not args.no_fly and waypoints:
             w_lat, w_lon, w_alt, w_name = waypoints[wpt_idx]
@@ -410,7 +433,51 @@ def run_patrol(fleet: Fleet, args, geo: Optional[GeoConfig] = None, gt=None) -> 
             sidecar_file.flush()
             frame_idx += 1
 
-            if not args.no_fly and args.follow_ship and gt is not None:
+            tip_handled = False
+            if tip_live is not None and tip_active:
+                tip_handled = True
+                dets = tip_live.detect(frame.image, frame_idx=frame_idx,
+                                       t_sim=frame.t_sim, pose=pose,
+                                       cam_intrinsics=entry["camera"])
+                ests = [geo.locate(c.cx, c.cy, pose, asset, entry["camera"])
+                        for c in dets]
+                best = None
+                for c, e in zip(dets, ests):
+                    if e is None or not getattr(c, "is_confirmed", False):
+                        continue
+                    if best is None or c.score > best[0].score:
+                        best = (c, e)
+                if best is not None:
+                    c, e = best
+                    tip_target = (e.lat, e.lon)
+                    log.info("TOWER TIP CONFIRMED by wing: %.6f,%.6f (score %.2f, "
+                             "dep %.1f) -> handoff", e.lat, e.lon, c.score,
+                             e.depression_deg)
+                    break
+                if now >= tip_deadline:
+                    log.info("Tower tip dry after %.0fs -> resuming normal patrol",
+                             tip_duration)
+                    tip_active = False
+                    tip_handled = False
+            elif tip_live is not None:
+                tip = tip_provider.latest_tip()
+                if tip is not None and tip.id not in tip_seen:
+                    tip_seen.add(tip.id)
+                    pt = tip_provider.search_point(tip)
+                    tip_active = True
+                    tip_deadline = now + tip_duration
+                    if plane.mode.upper() != "GUIDED":
+                        plane.set_mode("GUIDED", timeout=2.0)
+                    plane.goto(pt[0], pt[1], args.alt)
+                    last_goto_time = now
+                    tip_handled = True
+                    log.info("TOWER TIP [%s] %.6f,%.6f +/-%.0fm (%s) -> diverting wing",
+                             tip.source, pt[0], pt[1], tip.sigma_m,
+                             ",".join(tip.towers))
+
+            if tip_handled:
+                pass
+            elif not args.no_fly and args.follow_ship and gt is not None:
                 sp = gt.ship_latlon()
                 if sp is not None and now - last_goto_time > 5.0:
                     if plane.mode.upper() != "GUIDED":
@@ -452,8 +519,12 @@ def run_patrol(fleet: Fleet, args, geo: Optional[GeoConfig] = None, gt=None) -> 
                                  asset=asset, fps=args.hz, detections_path=detections_path,
                                  track_gate_m=args.track_gate, min_track_hits=args.min_track_hits)
     best_target = None
-    if tracks:
+    if tip_target is not None:
+        # The wing confirmed a tower tip in flight; that is the freshest fix.
+        best_target = tip_target
+    elif tracks:
         best_target = (tracks[0].lat, tracks[0].lon)
+    if tracks:
         if getattr(args, "publish_tracks", False):
             from arcticlib.tracks import TrackClient
             hdg, spd = track_course_speed(tracks[0])
@@ -467,7 +538,7 @@ def run_patrol(fleet: Fleet, args, geo: Optional[GeoConfig] = None, gt=None) -> 
     return {"run_dir": run_dir, "video_path": video_path, "sidecar_path": sidecar_path,
             "gps_track_path": gps_track_path, "detections_path": detections_path,
             "tracks_path": tracks_path, "tracks": tracks, "n_frames": frame_idx,
-            "best_target": best_target}
+            "best_target": best_target, "tip_target": tip_target}
 
 
 def main() -> int:
