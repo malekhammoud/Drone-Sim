@@ -110,34 +110,47 @@ def project_point(point_world: tuple[float, float, float],
                   ) -> Optional[tuple[float, float]]:
     """Project a world point into a camera image. Returns (u, v) or None.
 
-    Convention: world is Gazebo (x east, y north, z up); ``cam_yaw_deg`` is the
-    camera's bearing from grid north, clockwise; the camera looks along its own
-    +Z (OpenCV), image +u right, +v down. Approximate — good enough for labels,
-    not for calibration.
+    World frame: Gazebo (X East, Y North, Z Up).
+    NED frame: North = Y, East = X, Down = -Z.
+    Body frame: X forward, Y right, Z down.
+    Camera optical frame: X right (u), Y down (v), Z forward (depth).
     """
     dx = point_world[0] - cam_world[0]
     dy = point_world[1] - cam_world[1]
     dz = point_world[2] - cam_world[2]
 
-    # Rotate world -> camera: yaw about z, then pitch about y, then roll about x.
-    y = math.radians(cam_yaw_deg)
-    p = math.radians(cam_pitch_deg)
-    r = math.radians(cam_roll_deg)
-    # yaw: camera looks along grid bearing yaw, so rotate by -yaw
-    x1 = dx * math.cos(y) - dy * math.sin(y)
-    y1 = dx * math.sin(y) + dy * math.cos(y)
-    z1 = dz
-    # pitch about y (down positive tilt)
-    x2 = x1 * math.cos(p) + z1 * math.sin(p)
-    z2 = -x1 * math.sin(p) + z1 * math.cos(p)
-    y2 = y1
-    # roll about x
-    y3 = y2 * math.cos(r) - z2 * math.sin(r)
-    z3 = y2 * math.sin(r) + z2 * math.cos(r)
-    x3 = x2
+    # Convert to NED:
+    n = dy
+    e = dx
+    d = -dz
 
-    if z3 <= 1e-3:
-        return None                      # behind the camera
-    u = intrinsics["fx"] * (x3 / z3) + intrinsics["cx"]
-    v = intrinsics["fy"] * (y3 / z3) + intrinsics["cy"]
+    # Rotate NED -> body frame by yaw, pitch, roll
+    psi = math.radians(cam_yaw_deg)
+    theta = math.radians(cam_pitch_deg)
+    phi = math.radians(cam_roll_deg)
+
+    # 1. Yaw around D:
+    x1 =  n * math.cos(psi) + e * math.sin(psi)
+    y1 = -n * math.sin(psi) + e * math.cos(psi)
+    z1 =  d
+    # 2. Pitch around Y1:
+    x2 =  x1 * math.cos(theta) + z1 * math.sin(theta)
+    y2 =  y1
+    z2 = -x1 * math.sin(theta) + z1 * math.cos(theta)
+    # 3. Roll around X2:
+    x3 =  x2
+    y3 =  y2 * math.cos(phi) + z2 * math.sin(phi)
+    z3 = -y2 * math.sin(phi) + z2 * math.cos(phi)
+
+    # Body to camera optical frame:
+    # Camera looks along body +X (forward), image +u is body +Y (right), image +v is body +Z (down).
+    x_cam = y3
+    y_cam = z3
+    z_cam = x3
+
+    if z_cam <= 0.5:
+        return None  # Behind or too close to camera
+
+    u = intrinsics["fx"] * (x_cam / z_cam) + intrinsics["cx"]
+    v = intrinsics["fy"] * (y_cam / z_cam) + intrinsics["cy"]
     return u, v

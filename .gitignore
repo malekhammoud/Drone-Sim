@@ -12,5 +12,17 @@ debug_live_snap/
 terrain_tile.jpg
 terrain_mosaic.jpg
 *.mp4
+
+# Debug / intermediate analysis images and crops
+crop_*.jpg
+debug_*.jpg
+bellot_strait_*.jpg
+strait_*.jpg
+island_crop.jpg
+water_mask_*.png
+water_mask_*.jpg
+verified_output/
+
+# Illustrations: ignore all generated plans except final alternative plan
 patrol_plan*.png
-models/
+!patrol_plan_alternative.png
