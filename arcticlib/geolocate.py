@@ -562,3 +562,24 @@ def refine_tracks(detections: list, georef: Optional[Georef] = None,
         tracks.append(fuse_estimates([m["d"] for m in c["members"]], georef))
     tracks.sort(key=lambda t: (t.n_frames, t.n), reverse=True)
     return tracks
+
+
+def track_course_speed(track) -> tuple[Optional[float], Optional[float]]:
+    """Course (deg true) and speed (m/s) of a :class:`FusedTrack`.
+
+    Derived from the earliest and latest members, so it describes the target's
+    motion across the track. Returns ``(None, None)`` when it cannot be computed.
+    """
+    members = [m for m in getattr(track, "members", [])
+               if _dget(m, "lat", None) is not None]
+    if len(members) < 2:
+        return None, None
+    members.sort(key=lambda m: _dget(m, "t_sim", 0.0))
+    a, b = members[0], members[-1]
+    ta, tb = float(_dget(a, "t_sim", 0.0)), float(_dget(b, "t_sim", 0.0))
+    alat, alon = float(_dget(a, "lat")), float(_dget(a, "lon"))
+    blat, blon = float(_dget(b, "lat")), float(_dget(b, "lon"))
+    dist = distance_m(alat, alon, blat, blon)
+    if tb - ta <= 1e-3 or dist < 0.5:
+        return None, None
+    return bearing_deg(alat, alon, blat, blon), dist / (tb - ta)

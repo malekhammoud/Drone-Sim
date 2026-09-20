@@ -239,7 +239,7 @@ def run_quad_follow(fleet: Fleet, target: tuple[float, float], args,
                     ship_est = (a * e.lat + (1 - a) * ship_est[0],
                                 a * e.lon + (1 - a) * ship_est[1])
                 if track_client is not None:
-                    track_client.post(args.track_name, e.lat, e.lon)
+                    track_client.post_fix(args.track_name, e.lat, e.lon, frame.t_sim)
                 if truth is not None:
                     te = distance_m(e.lat, e.lon, truth[0], truth[1])
                     truth_errs.append(te)
