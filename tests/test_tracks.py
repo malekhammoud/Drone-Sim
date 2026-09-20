@@ -33,6 +33,32 @@ class TestPostFix(unittest.TestCase):
         self.assertIsNone(kw["heading"])
 
 
+class TestThrottle(unittest.TestCase):
+    def setUp(self):
+        # gentle defaults, no global spacing so the test is fast
+        self.client = TrackClient("http://127.0.0.1:9", min_interval=0.0,
+                                  post_every_s=5.0, min_move_m=5.0, retries=0)
+        self.calls = []
+        self.client.post = lambda *a, **k: (self.calls.append((a, k)), {"ok": True})[1]
+
+    def test_skips_soon_and_unmoved(self):
+        self.client.post_fix("X", 72.0, -95.0, t=100.0)          # create -> posted
+        skipped = self.client.post_fix("X", 72.00001, -95.0, t=101.0)  # 1 s, ~1 m
+        self.assertIsNone(skipped)
+        self.assertEqual(len(self.calls), 1)
+
+    def test_posts_after_interval(self):
+        self.client.post_fix("X", 72.0, -95.0, t=100.0)
+        self.client.post_fix("X", 72.0, -95.0, t=106.0)          # 6 s later
+        self.assertEqual(len(self.calls), 2)
+
+    def test_posts_after_meaningful_move(self):
+        self.client.post_fix("X", 72.0, -95.0, t=100.0)
+        lat2, lon2 = destination(72.0, -95.0, 0.0, 50.0)         # moved 50 m
+        self.client.post_fix("X", lat2, lon2, t=100.5)           # but only 0.5 s
+        self.assertEqual(len(self.calls), 2)
+
+
 class TestTrackCourseSpeed(unittest.TestCase):
     def _member(self, lat, lon, t, idx):
         return {"lat": lat, "lon": lon, "error_radius_m": 10.0, "index": idx,

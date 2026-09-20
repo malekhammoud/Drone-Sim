@@ -41,6 +41,13 @@ Endpoint: `config.url(config.tracks_port)` → `http://127.0.0.1:8010`. Note the
 local `arctic-sim` compose has **no 8010 service**; that endpoint is the
 competition track API (the curl examples point at `<SIM-IP>:8010`).
 
+**Rate limiting (deliberately gentle — the endpoint throttles):** at most one
+request per `min_interval` (default **1 s**) globally; at most one request per
+`post_every_s` (default **5 s**) per track, and only if it moved more than
+`min_move_m` (default **5 m**); HTTP **429** is respected with an
+honour-`Retry-After` backoff. Tune via
+`TrackClient(min_interval, post_every_s, min_move_m)` if needed.
+
 CLI (the curl examples, as a tool):
 
 ```bash
