@@ -21,6 +21,12 @@ It stays modular: this file only orchestrates ``tools/patrol_and_record_gps``,
 testable on its own.
 
 Usage:
+    # Bare run — full mission with defaults. In DEV the wing auto-chases the
+    # vessel and the handoff can fall back to it; otherwise the wing runs the
+    # normal safe patrol and hands off whatever the detector confirms:
+    python main.py
+    ARCTICSIM_DEV=1 python main.py
+
     # Full DEV-assisted mission (wing chases the vessel, then quad follows):
     ARCTICSIM_DEV=1 python main.py --follow-ship \
         --patrol-duration 150 --quad-duration 180
@@ -118,8 +124,10 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--speed", type=float, default=20.0, help="wing cruise airspeed m/s")
     ap.add_argument("--margin", type=float, default=120.0, help="wing safe coast margin, m")
     ap.add_argument("--spacing-lon", type=float, default=0.01, help="wing lane spacing, deg")
-    ap.add_argument("--follow-ship", action="store_true",
-                    help="DEV: wing chases the live vessel (guarantees acquisition)")
+    ap.add_argument("--follow-ship", dest="follow_ship", action="store_true", default=None,
+                    help="wing chases the live vessel (auto-on with ARCTICSIM_DEV=1)")
+    ap.add_argument("--no-follow-ship", dest="follow_ship", action="store_false", default=None,
+                    help="force the normal safe patrol even in DEV")
     ap.add_argument("--no-fly", action="store_true", help="record only, no commands")
     # Phase 2 — quad
     ap.add_argument("--quad-alt", type=float, default=25.0, help="quad hover altitude (rel), m")
@@ -156,8 +164,20 @@ def build_parser() -> argparse.ArgumentParser:
     return ap
 
 
+def resolve_defaults(args) -> argparse.Namespace:
+    """Fill in no-argument defaults so a bare ``python main.py`` runs the mission.
+
+    In DEV the wing auto-chases the live vessel (and the handoff can fall back to
+    it); otherwise the wing flies the normal safe patrol and hands off whatever
+    the 3-stage detector confirms. ``--no-follow-ship`` forces the patrol in DEV.
+    """
+    if args.follow_ship is None:
+        args.follow_ship = DEV
+    return args
+
+
 def main() -> int:
-    args = build_parser().parse_args()
+    args = resolve_defaults(build_parser().parse_args())
 
     cfg = load_config()
     fleet = Fleet.from_config(cfg)
