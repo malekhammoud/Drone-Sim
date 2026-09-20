@@ -29,3 +29,4 @@ verified_output/
 patrol_plan*.png
 !patrol_plan_alternative.png
 two_step_runs/
+mission_output/

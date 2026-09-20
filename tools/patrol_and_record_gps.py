@@ -4,18 +4,15 @@
 Merges the remote patrol rework (safe 3-tier strait waypoints, 3-stage
 Color+CNN+Temporal detector) with the local trig-GPS additions:
 
-1. **GPS + altitude logging.** Every recorded frame carries a ``gps`` block
-   (lat/lon, ``alt_amsl``, ``alt_rel``, derived AGL) and a ``gps_track.csv``.
-2. **Geolocated detections.** Each detector hit (confirmed or tentative) is
-   turned into lat/lon with :mod:`arcticlib.geolocate` (pixel -> NED ray ->
-   flat-ground intersection -> WGS84 geodesic), annotated on the video HUD and
-   written to ``detections.jsonl`` with a 1-sigma error radius and a
-   grazing-angle flag. ``tracks.jsonl`` holds inverse-variance fused tracks.
+1. **GPS + altitude logging.** Every recorded frame carries a ``gps`` block and a
+   ``gps_track.csv`` is written next to the frames.
+2. **Geolocated detections.** Each detector hit is turned into lat/lon with
+   :mod:`arcticlib.geolocate`, annotated on the video HUD and written to
+   ``detections.jsonl`` (with error radius + grazing flag). ``tracks.jsonl``
+   holds inverse-variance fused tracks.
 
-Usage:
-    ARCTICSIM_DEV=1 python tools/patrol_and_record_gps.py --duration 180 --out patrol_run
-    python tools/patrol_and_record_gps.py --no-fly --duration 30
-    ARCTICSIM_DEV=1 python tools/patrol_and_record_gps.py --follow-ship --duration 150
+``run_patrol()`` is the reusable entry point (used by the root ``main.py``); the
+CLI below runs the patrol on its own.
 """
 from __future__ import annotations
 
@@ -58,40 +55,24 @@ def _geo_label(est) -> Optional[str]:
 def generate_safe_strait_waypoints(step_lon: float = 0.01,
                                    safe_margin_m: float = 120.0
                                    ) -> list[tuple[float, float, float, str]]:
-    """N-S zig-zag waypoints with a safe margin and a 3-tier altitude profile.
-
-    (Ported from the remote patrol rework; unchanged.)
-    """
+    """N-S zig-zag waypoints with a safe margin and a 3-tier altitude profile."""
     coast_profile = [
-        (-94.920, 71.99317, 71.97693, None),
-        (-94.910, 71.99508, 71.97635, None),
-        (-94.900, 71.99359, 71.97688, None),
-        (-94.890, 71.99428, 71.97863, None),
-        (-94.880, 71.99497, 71.97826, None),
-        (-94.870, 71.99625, 71.98017, None),
-        (-94.860, 71.99970, 71.97943, None),
-        (-94.850, 72.00506, 71.98065, 72.00506),
-        (-94.840, 72.00450, 71.98176, 72.00450),
-        (-94.830, 71.99933, 71.98197, 72.00200),
-        (-94.820, 71.99832, 71.98309, None),
-        (-94.810, 71.99906, 71.98420, None),
-        (-94.800, 72.00453, 71.98452, None),
-        (-94.790, 72.00490, 71.98463, None),
-        (-94.780, 72.00612, 71.98436, None),
-        (-94.770, 72.00824, 71.98415, None),
-        (-94.760, 72.00819, 71.98473, None),
-        (-94.750, 72.00861, 71.99041, None),
-        (-94.740, 72.01137, 71.99009, None),
-        (-94.730, 72.01201, 71.99030, None),
-        (-94.720, 72.01222, 71.99280, None),
-        (-94.710, 72.01164, 71.99296, None),
-        (-94.700, 72.01328, 71.99370, None),
-        (-94.690, 72.01434, 71.99704, None),
+        (-94.920, 71.99317, 71.97693, None), (-94.910, 71.99508, 71.97635, None),
+        (-94.900, 71.99359, 71.97688, None), (-94.890, 71.99428, 71.97863, None),
+        (-94.880, 71.99497, 71.97826, None), (-94.870, 71.99625, 71.98017, None),
+        (-94.860, 71.99970, 71.97943, None), (-94.850, 72.00506, 71.98065, 72.00506),
+        (-94.840, 72.00450, 71.98176, 72.00450), (-94.830, 71.99933, 71.98197, 72.00200),
+        (-94.820, 71.99832, 71.98309, None), (-94.810, 71.99906, 71.98420, None),
+        (-94.800, 72.00453, 71.98452, None), (-94.790, 72.00490, 71.98463, None),
+        (-94.780, 72.00612, 71.98436, None), (-94.770, 72.00824, 71.98415, None),
+        (-94.760, 72.00819, 71.98473, None), (-94.750, 72.00861, 71.99041, None),
+        (-94.740, 72.01137, 71.99009, None), (-94.730, 72.01201, 71.99030, None),
+        (-94.720, 72.01222, 71.99280, None), (-94.710, 72.01164, 71.99296, None),
+        (-94.700, 72.01328, 71.99370, None), (-94.690, 72.01434, 71.99704, None),
     ]
     c_lons = [p[0] for p in coast_profile]
     c_north = [p[1] for p in coast_profile]
     c_south = [p[2] for p in coast_profile]
-
     margin_deg = safe_margin_m / 111320.0
     col_lons = np.round(np.arange(-94.92, -94.69 + 0.0001, step_lon), 4)
     waypoints: list[tuple[float, float, float, str]] = []
@@ -103,22 +84,20 @@ def generate_safe_strait_waypoints(step_lon: float = 0.01,
         w_top_lat = n_lat - margin_deg
         w_bot_lat = s_lat + margin_deg
         w_mid_lat = (w_top_lat + w_bot_lat) / 2.0
-
         if is_island:
             alt_top = alt_mid = alt_bot = 125.0
             col_tag = f"Col {i+1} (Island 125m)"
         else:
             alt_top, alt_mid, alt_bot = 100.0, 75.0, 100.0
             col_tag = f"Col {i+1}"
-
         if i % 2 == 0:
-            waypoints.append((w_top_lat, float(l), alt_top, f"{col_tag} North"))
-            waypoints.append((w_mid_lat, float(l), alt_mid, f"{col_tag} Center"))
-            waypoints.append((w_bot_lat, float(l), alt_bot, f"{col_tag} South"))
+            waypoints += [(w_top_lat, float(l), alt_top, f"{col_tag} North"),
+                          (w_mid_lat, float(l), alt_mid, f"{col_tag} Center"),
+                          (w_bot_lat, float(l), alt_bot, f"{col_tag} South")]
         else:
-            waypoints.append((w_bot_lat, float(l), alt_bot, f"{col_tag} South"))
-            waypoints.append((w_mid_lat, float(l), alt_mid, f"{col_tag} Center"))
-            waypoints.append((w_top_lat, float(l), alt_top, f"{col_tag} North"))
+            waypoints += [(w_bot_lat, float(l), alt_bot, f"{col_tag} South"),
+                          (w_mid_lat, float(l), alt_mid, f"{col_tag} Center"),
+                          (w_top_lat, float(l), alt_top, f"{col_tag} North")]
 
     user_adjustments = {1: -0.0025, 3: +0.0025, 4: +0.0030, 6: -0.0025, 9: +0.0025,
                         21: +0.0025, 24: -0.0025, 25: -0.0025, 51: +0.0022,
@@ -127,21 +106,20 @@ def generate_safe_strait_waypoints(step_lon: float = 0.01,
             for idx, (wlat, wlon, walt, wname) in enumerate(waypoints, start=1)]
 
 
-def render_patrol_video(frames_dir: str,
-                        sidecar_path: str,
-                        output_video_path: str,
+def render_patrol_video(frames_dir: str, sidecar_path: str, output_video_path: str,
                         detector: Optional[VerifiedDetector] = None,
                         geo: Optional[GeoConfig] = None,
-                        asset: str = "fixed-wing",
-                        fps: float = 4.0,
+                        asset: str = "fixed-wing", fps: float = 4.0,
                         detections_path: Optional[str] = None,
                         track_gate_m: float = 2000.0,
-                        min_track_hits: int = 2) -> None:
-    """3-stage detect + geolocate + HUD, write MP4, detections.jsonl, tracks.jsonl."""
+                        min_track_hits: int = 2) -> list:
+    """3-stage detect + geolocate + HUD; write MP4, detections.jsonl, tracks.jsonl.
+
+    Returns the list of fused :class:`~arcticlib.geolocate.FusedTrack`.
+    """
     if not os.path.exists(sidecar_path):
         log.error("Sidecar not found: %s", sidecar_path)
-        return
-
+        return []
     if detector is None:
         detector = VerifiedDetector(model_path="models/patch_verifier.pt",
                                     min_color_score=0.25, min_verify_prob=0.50,
@@ -150,7 +128,6 @@ def render_patrol_video(frames_dir: str,
         geo = GeoConfig()
 
     log.info("Processing frames with 3-stage detector + GPS: %s", output_video_path)
-
     entries = []
     with open(sidecar_path) as f:
         for line in f:
@@ -158,15 +135,14 @@ def render_patrol_video(frames_dir: str,
                 entries.append(json.loads(line))
     if not entries:
         log.warning("No entries in sidecar file.")
-        return
+        return []
 
     first_img = cv2.imread(os.path.join(frames_dir, os.path.basename(entries[0]["frame"])))
     if first_img is None:
         log.error("Cannot read first frame.")
-        return
+        return []
     h, w = first_img.shape[:2]
-    writer = cv2.VideoWriter(output_video_path, cv2.VideoWriter_fourcc(*"mp4v"),
-                             fps, (w, h))
+    writer = cv2.VideoWriter(output_video_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
     det_file = open(detections_path, "w") if detections_path else None
     geo_records: list[dict] = []
     total_confirmed = 0
@@ -188,7 +164,6 @@ def render_patrol_video(frames_dir: str,
 
             estimates = [geo.locate(c.cx, c.cy, pose, asset, intr) for c in candidates]
             labels = [_geo_label(e) for e in estimates]
-
             for c, e in zip(candidates, estimates):
                 if e is None:
                     continue
@@ -227,15 +202,13 @@ def render_patrol_video(frames_dir: str,
             cv2.putText(vis, f"GPS: {gps.get('lat', 0.0):.5f}, {gps.get('lon', 0.0):.5f}"
                              f" | AGL: {gps.get('agl_m', 0.0):.0f}m", (20, 114),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, (120, 220, 255), 1)
-
             if confirmed:
                 c0 = confirmed[0]
                 e0 = geo.locate(c0.cx, c0.cy, pose, asset, intr)
-                if e0 is not None:
-                    status = (f"CONFIRMED #{c0.track_id} ({c0.hits}h {c0.score:.2f}) -> "
-                              f"{e0.lat:.5f},{e0.lon:.5f} +/-{e0.error_radius_m:.0f}m")
-                else:
-                    status = f"CONFIRMED #{c0.track_id} ({c0.hits}h {c0.score:.2f}) - no ground fix"
+                status = (f"CONFIRMED #{c0.track_id} ({c0.hits}h {c0.score:.2f}) -> "
+                          f"{e0.lat:.5f},{e0.lon:.5f} +/-{e0.error_radius_m:.0f}m"
+                          if e0 is not None else
+                          f"CONFIRMED #{c0.track_id} ({c0.hits}h {c0.score:.2f}) - no fix")
                 cv2.putText(vis, status, (20, 148), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (0, 255, 0), 2)
             elif candidates:
                 c0 = candidates[0]
@@ -253,8 +226,7 @@ def render_patrol_video(frames_dir: str,
 
     tracks = []
     if geo_records:
-        tracks = refine_tracks(geo_records, track_gate_m=track_gate_m,
-                               min_frames=min_track_hits)
+        tracks = refine_tracks(geo_records, track_gate_m=track_gate_m, min_frames=min_track_hits)
         if detections_path:
             tracks_path = os.path.join(os.path.dirname(detections_path), "tracks.jsonl")
             with open(tracks_path, "w") as fh:
@@ -267,24 +239,22 @@ def render_patrol_video(frames_dir: str,
                         "max_depression_deg": t.max_depression_deg}) + "\n")
             log.info("Fused %d detections into %d track(s) -> %s",
                      len(geo_records), len(tracks), tracks_path)
-
-    log.info("Finished rendering video: %s (confirmed-boat frames: %d/%d, geolocated: %d)",
+    log.info("Finished rendering: %s (confirmed frames: %d/%d, geolocated: %d)",
              output_video_path, total_confirmed, total_frames, len(geo_records))
+    return tracks
 
 
-def main() -> int:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Fixed-wing patrol, GPS recorder & geolocated video.")
-    parser.add_argument("--alt", type=float, default=90.0, help="Takeoff altitude (default: 90)")
-    parser.add_argument("--margin", type=float, default=120.0, help="Safe distance from coast, m")
-    parser.add_argument("--speed", type=float, default=20.0, help="Cruise airspeed m/s")
-    parser.add_argument("--spacing-lon", type=float, default=0.01, help="Longitude step between passes")
-    parser.add_argument("--hz", type=float, default=3.0, help="Camera recording frame rate")
-    parser.add_argument("--duration", type=float, default=300.0, help="Patrol duration in seconds")
-    parser.add_argument("--out", default="patrol_output", help="Output directory root")
-    parser.add_argument("--no-fly", action="store_true", help="Record only, no commands")
-    parser.add_argument("--follow-ship", action="store_true",
-                        help="TEST ONLY (needs ARCTICSIM_DEV=1): chase the live vessel")
-    # Geolocation options
+    parser.add_argument("--alt", type=float, default=90.0)
+    parser.add_argument("--margin", type=float, default=120.0)
+    parser.add_argument("--speed", type=float, default=20.0)
+    parser.add_argument("--spacing-lon", type=float, default=0.01)
+    parser.add_argument("--hz", type=float, default=3.0)
+    parser.add_argument("--duration", type=float, default=300.0)
+    parser.add_argument("--out", default="patrol_output")
+    parser.add_argument("--no-fly", action="store_true")
+    parser.add_argument("--follow-ship", action="store_true")
     parser.add_argument("--ground-elevation", type=float, default=0.0)
     parser.add_argument("--alt-ref", choices=["amsl", "rel"], default="amsl")
     parser.add_argument("--camera-pitch-deg", type=float, default=None)
@@ -299,23 +269,28 @@ def main() -> int:
     parser.add_argument("--model", default="models/patch_verifier.pt")
     parser.add_argument("--no-temporal", action="store_true")
     parser.add_argument("--min-hits", type=int, default=8)
-    args = parser.parse_args()
+    return parser
 
-    geo = GeoConfig(alt_ref=args.alt_ref, ground_elevation_m=args.ground_elevation,
-                    camera_pitch_deg=args.camera_pitch_deg,
-                    min_depression_deg=args.min_depression, reject_grazing=args.reject_grazing,
-                    attitude_sigma_deg=args.attitude_sigma, position_sigma_m=args.position_sigma,
-                    altitude_sigma_m=args.altitude_sigma, enabled=not args.no_geolocate)
 
-    cfg = load_config()
-    georef = Georef(cfg.origin_lat, cfg.origin_lon, ps_centre_x=cfg.ps_centre_x, ps_centre_y=cfg.ps_centre_y)
-    fleet = Fleet.from_config(cfg)
-    fleet.wait_ready(15)
+def run_patrol(fleet: Fleet, args, geo: Optional[GeoConfig] = None, gt=None) -> dict:
+    """Fly the wing patrol (or chase the ship), record GPS + frames, render.
+
+    Reuses the caller's :class:`Fleet` and optional ``GroundTruth``; does not
+    shut them down. Returns paths plus the fused tracks and best handoff target.
+    """
+    cfg = fleet.config
+    georef = Georef(cfg.origin_lat, cfg.origin_lon, ps_centre_x=cfg.ps_centre_x,
+                    ps_centre_y=cfg.ps_centre_y)
+    if geo is None:
+        geo = GeoConfig(alt_ref=args.alt_ref, ground_elevation_m=args.ground_elevation,
+                        camera_pitch_deg=args.camera_pitch_deg,
+                        min_depression_deg=args.min_depression, reject_grazing=args.reject_grazing,
+                        attitude_sigma_deg=args.attitude_sigma, position_sigma_m=args.position_sigma,
+                        altitude_sigma_m=args.altitude_sigma, enabled=not args.no_geolocate)
 
     plane = fleet.plane
     if plane is None or "fixed-wing" not in fleet.cams:
-        log.error("Fixed-wing asset/camera is not available.")
-        return 1
+        raise RuntimeError("fixed-wing asset/camera not available")
     cam = fleet.cams["fixed-wing"]
     asset = "fixed-wing"
     mount_pitch = math.degrees(geo.mount_pitch_rad(asset))
@@ -335,24 +310,21 @@ def main() -> int:
     sidecar_path = os.path.join(run_dir, "sidecar.jsonl")
     gps_track_path = os.path.join(run_dir, "gps_track.csv")
     detections_path = os.path.join(run_dir, "detections.jsonl")
+    tracks_path = os.path.join(run_dir, "tracks.jsonl")
     video_path = os.path.join(run_dir, f"patrol_{stamp}.mp4")
 
-    gt = None
-    if DEV:
-        from arcticlib.groundtruth import GroundTruth, project_point
-        gt = GroundTruth(cfg, georef)
-        log.info("Ground truth active (DEV) - projecting ship into the video")
     if args.follow_ship and gt is None:
-        log.error("--follow-ship requires ARCTICSIM_DEV=1")
-        return 1
+        raise RuntimeError("--follow-ship requires ARCTICSIM_DEV=1")
+
+    project_point = None
+    if gt is not None:
+        from arcticlib.groundtruth import project_point  # noqa: F401
 
     if not args.no_fly:
         if not plane.armed or plane.alt_rel < 30.0:
             log.info("Fixed-wing on ground; taking off to %.1f m...", args.alt)
             if not plane.takeoff(alt=args.alt, timeout=120.0):
-                log.error("Takeoff failed or timed out. Aborting.")
-                fleet.shutdown()
-                return 1
+                raise RuntimeError("fixed-wing takeoff failed")
             climb_deadline = time.monotonic() + 60.0
             while time.monotonic() < climb_deadline and plane.alt_rel < 50.0:
                 time.sleep(1.0)
@@ -403,7 +375,6 @@ def main() -> int:
 
             pose = fleet.pose_at(asset, frame.t_sim, clock="sim") or fleet.pose(asset)
             ship = gt.ship_pose() if gt else None
-
             pose_dict = None if pose is None else {
                 "lat": pose.lat, "lon": pose.lon, "alt_rel": pose.alt_rel,
                 "alt_amsl": pose.alt_amsl, "roll": pose.roll, "pitch": pose.pitch,
@@ -413,19 +384,16 @@ def main() -> int:
                      "width": frame.width, "height": frame.height,
                      "camera": cfg.assets[asset].camera.intrinsics(),
                      "camera_mount_pitch_deg": mount_pitch, "pose": pose_dict}
-
             if pose is not None:
                 agl = geo.agl(pose)
-                entry["gps"] = {"lat": pose.lat, "lon": pose.lon,
-                                "alt_amsl": pose.alt_amsl, "alt_rel": pose.alt_rel,
-                                "agl_m": agl, "ground_elevation_m": geo.ground_elevation_m,
-                                "alt_ref": geo.alt_ref}
+                entry["gps"] = {"lat": pose.lat, "lon": pose.lon, "alt_amsl": pose.alt_amsl,
+                                "alt_rel": pose.alt_rel, "agl_m": agl,
+                                "ground_elevation_m": geo.ground_elevation_m, "alt_ref": geo.alt_ref}
                 gps_writer.writerow([f"{frame.t_sim:.3f}", f"{pose.lat:.7f}", f"{pose.lon:.7f}",
                                      f"{pose.alt_amsl:.2f}", f"{pose.alt_rel:.2f}", f"{agl:.2f}",
                                      f"{pose.roll:.5f}", f"{pose.pitch:.5f}", f"{pose.yaw:.5f}"])
                 gps_file.flush()
-
-            if ship is not None and pose is not None:
+            if ship is not None and pose is not None and project_point is not None:
                 entry["groundtruth"] = ship
                 cam_world = georef.latlon_to_world(pose.lat, pose.lon) + (pose.alt_amsl,)
                 grid_yaw_deg = pose.yaw * 57.29577951308232 - cfg.convergence_deg
@@ -439,7 +407,6 @@ def main() -> int:
             sidecar_file.flush()
             frame_idx += 1
 
-            # Steering: chase the live vessel, else walk the safe waypoints.
             if not args.no_fly and args.follow_ship and gt is not None:
                 sp = gt.ship_latlon()
                 if sp is not None and now - last_goto_time > 5.0:
@@ -473,25 +440,44 @@ def main() -> int:
     finally:
         sidecar_file.close()
         gps_file.close()
-        if gt:
-            gt.stop()
 
     log.info("Flight recording finished: %d frames in %s", frame_idx, frames_dir)
-
     detector = VerifiedDetector(model_path=args.model, min_color_score=0.25,
-                                min_verify_prob=0.50,
-                                enable_temporal=not args.no_temporal,
+                                min_verify_prob=0.50, enable_temporal=not args.no_temporal,
                                 min_hits=args.min_hits, max_misses=4)
-    render_patrol_video(frames_dir, sidecar_path, video_path, detector, geo,
-                        asset=asset, fps=args.hz, detections_path=detections_path,
-                        track_gate_m=args.track_gate, min_track_hits=args.min_track_hits)
+    tracks = render_patrol_video(frames_dir, sidecar_path, video_path, detector, geo,
+                                 asset=asset, fps=args.hz, detections_path=detections_path,
+                                 track_gate_m=args.track_gate, min_track_hits=args.min_track_hits)
+    best_target = None
+    if tracks:
+        best_target = (tracks[0].lat, tracks[0].lon)
+    return {"run_dir": run_dir, "video_path": video_path, "sidecar_path": sidecar_path,
+            "gps_track_path": gps_track_path, "detections_path": detections_path,
+            "tracks_path": tracks_path, "tracks": tracks, "n_frames": frame_idx,
+            "best_target": best_target}
 
+
+def main() -> int:
+    args = build_parser().parse_args()
+    cfg = load_config()
+    fleet = Fleet.from_config(cfg)
+    fleet.wait_ready(15)
+    gt = None
+    if DEV:
+        from arcticlib.groundtruth import GroundTruth
+        gt = GroundTruth(cfg)
+    try:
+        res = run_patrol(fleet, args, gt=gt)
+    finally:
+        if gt is not None:
+            gt.stop()
+        fleet.shutdown()
     print("\n=======================================================")
     print("Patrol complete! Outputs:")
-    print(f"  video      : {video_path}")
-    print(f"  sidecar    : {sidecar_path}")
-    print(f"  gps track  : {gps_track_path}")
-    print(f"  detections : {detections_path}")
+    for k in ("video_path", "sidecar_path", "gps_track_path", "detections_path", "tracks_path"):
+        print(f"  {k:<15}: {res[k]}")
+    if res.get("best_target"):
+        print(f"  best target    : {res['best_target'][0]:.6f}, {res['best_target'][1]:.6f}")
     print("=======================================================\n")
     return 0
 
