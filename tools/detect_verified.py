@@ -457,7 +457,7 @@ def main() -> int:
                             coords = pixel_to_latlon(best.cx, best.cy, pose, cam_intrinsics, georef)
                             if coords:
                                 lat, lon = coords
-                                res = track_client.post("Sierra One", lat, lon)
+                                res = track_client.post_fix("Sierra One", lat, lon, frame.t_sim)
                                 status_str += f" -> Track posted: ({lat:.5f}, {lon:.5f}) res={res is not None}"
                     elif dets:
                         best = dets[0]

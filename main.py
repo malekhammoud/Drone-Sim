@@ -87,6 +87,8 @@ def _patrol_ns(args) -> argparse.Namespace:
     ns.min_track_hits = args.min_track_hits
     ns.no_temporal = args.no_temporal
     ns.min_hits = args.min_hits
+    ns.publish_tracks = args.publish_tracks
+    ns.track_name = args.track_name
     return ns
 
 

@@ -35,7 +35,7 @@ import numpy as np
 from arcticlib.config import load_config
 from arcticlib.fleet import Fleet
 from arcticlib.geo import Georef, distance_m
-from arcticlib.geolocate import GeoConfig, refine_tracks
+from arcticlib.geolocate import GeoConfig, refine_tracks, track_course_speed
 from tools.detect_verified import VerifiedDetector
 from tools.detect_verified_gps import draw_geolocated
 
@@ -269,6 +269,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", default="models/patch_verifier.pt")
     parser.add_argument("--no-temporal", action="store_true")
     parser.add_argument("--min-hits", type=int, default=8)
+    parser.add_argument("--publish-tracks", action="store_true",
+                        help="POST the best fused track to /api/tracks")
+    parser.add_argument("--track-name", default="Sierra One")
     return parser
 
 
@@ -451,6 +454,16 @@ def run_patrol(fleet: Fleet, args, geo: Optional[GeoConfig] = None, gt=None) -> 
     best_target = None
     if tracks:
         best_target = (tracks[0].lat, tracks[0].lon)
+        if getattr(args, "publish_tracks", False):
+            from arcticlib.tracks import TrackClient
+            hdg, spd = track_course_speed(tracks[0])
+            res = TrackClient(cfg.url(cfg.tracks_port)).post(
+                getattr(args, "track_name", "Sierra One"),
+                tracks[0].lat, tracks[0].lon, heading=hdg, speed=spd)
+            log.info("Published track '%s' -> %.6f, %.6f (hdg=%s, spd=%s) ok=%s",
+                     getattr(args, "track_name", "Sierra One"), tracks[0].lat, tracks[0].lon,
+                     None if hdg is None else round(hdg, 1),
+                     None if spd is None else round(spd, 2), res is not None)
     return {"run_dir": run_dir, "video_path": video_path, "sidecar_path": sidecar_path,
             "gps_track_path": gps_track_path, "detections_path": detections_path,
             "tracks_path": tracks_path, "tracks": tracks, "n_frames": frame_idx,

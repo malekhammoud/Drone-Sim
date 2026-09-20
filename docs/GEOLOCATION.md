@@ -27,6 +27,39 @@ On the ground-truth dataset (`tools/gt_runs/2026-09-19T21-26-43`) the merged
 pipeline produced a single fused ship track of **244 hits over 190 frames**
 (mean score 0.76), and the CNN cut Stage-1 false positives by ~97%.
 
+## Track API — map the boat
+
+`arcticlib/tracks.py` implements the competition create/update/list contract:
+
+* `TrackClient.post(name, lat, lon, heading=None, speed=None)` — creates on the
+  first POST with a name, updates thereafter (bumps `fixes`).
+* `TrackClient.post_fix(name, lat, lon, t)` — same, but derives **heading**
+  (deg true) and **speed** (m/s) from the previous fix for that name.
+* `TrackClient.list()`.
+
+Endpoint: `config.url(config.tracks_port)` → `http://127.0.0.1:8010`. Note the
+local `arctic-sim` compose has **no 8010 service**; that endpoint is the
+competition track API (the curl examples point at `<SIM-IP>:8010`).
+
+**Rate limiting (deliberately gentle — the endpoint throttles):** at most one
+request per `min_interval` (default **1 s**) globally; at most one request per
+`post_every_s` (default **5 s**) per track, and only if it moved more than
+`min_move_m` (default **5 m**); HTTP **429** is respected with an
+honour-`Retry-After` backoff. Tune via
+`TrackClient(min_interval, post_every_s, min_move_m)` if needed.
+
+CLI (the curl examples, as a tool):
+
+```bash
+python tools/tracks_cli.py post --name "Sierra One" --lat 71.9965 --lon -94.8448
+python tools/tracks_cli.py post --name "Sierra One" --lat 71.9975 --lon -94.8450 --heading 315 --speed 6.5
+python tools/tracks_cli.py list
+```
+
+Publishing from a mission: `--publish-tracks` (`main.py`, `quad_follow_ship.py`,
+`patrol_and_record_gps.py`). The wing posts its best fused track with
+course/speed; the quad and live detector post each fix with derived heading/speed.
+
 ## Where it is wired in
 
 | File | Role |

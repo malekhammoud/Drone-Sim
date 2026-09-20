@@ -462,7 +462,8 @@ def main() -> int:
                                        f"+/-{est.error_radius_m:.0f}m dep={est.depression_deg:.1f}"
                                        f"{' GRAZING' if est.grazing else ''}")
                             if track_client is not None:
-                                res = track_client.post("Sierra One", est.lat, est.lon)
+                                res = track_client.post_fix("Sierra One", est.lat, est.lon,
+                                                            frame.t_sim)
                                 status += f" | track={res is not None}"
                         else:
                             status += " -> no ground fix (above horizon / rejected)"
