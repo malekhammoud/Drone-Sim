@@ -36,9 +36,15 @@ import numpy as np
 
 from arcticlib.config import load_config
 from arcticlib.fleet import Fleet
-from arcticlib.geo import Georef, distance_m
+from arcticlib.geo import (
+    Georef,
+    distance_m,
+    generate_search_spiral,
+    reroute_around_closed_zone,
+)
+from arcticlib.tracks import TrackClient
 from tools.detect_color import ColorAnomalyDetector
-from tools.detect_verified import VerifiedDetector
+from tools.detect_verified import VerifiedDetector, pixel_to_latlon
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("patrol")
@@ -280,10 +286,21 @@ def main() -> int:
     parser.add_argument("--duration", type=float, default=300.0, help="Patrol duration in seconds (0 = full grid)")
     parser.add_argument("--out", default="patrol_output", help="Output directory root")
     parser.add_argument("--no-fly", action="store_true", help="Record only without commanding takeoff/waypoints")
+    parser.add_argument("--closed-zone", type=str, default=None,
+                        help="Closed zone overlay formatted as 'lat,lon,radius_m' (e.g. '71.995,-94.810,800')")
+    parser.add_argument("--intercept", type=str, default=None,
+                        help="Dynamic intercept coordinate target as 'lat,lon' (e.g. '71.985,-94.750')")
+    parser.add_argument("--loop", action="store_true", default=True,
+                        help="Continuously loop through waypoints until boat found or duration ends (default: True)")
+    parser.add_argument("--no-loop", dest="loop", action="store_false",
+                        help="Do not loop waypoints after completing one pass")
+    parser.add_argument("--publish-tracks", action="store_true",
+                        help="Post confirmed vessel tracks to /api/tracks")
     args = parser.parse_args()
 
     cfg = load_config()
     georef = Georef(cfg.origin_lat, cfg.origin_lon, ps_centre_x=cfg.ps_centre_x, ps_centre_y=cfg.ps_centre_y)
+    track_client = TrackClient(cfg.url(cfg.tracks_port)) if args.publish_tracks else None
     fleet = Fleet.from_config(cfg)
     fleet.wait_ready(15)
 
@@ -301,7 +318,46 @@ def main() -> int:
     # Generate safe waypoints along the strait curve with 3-tier altitude
     safe_margin = getattr(args, "margin", 120.0)
     waypoints = generate_safe_strait_waypoints(step_lon=args.spacing_lon, safe_margin_m=safe_margin)
-    log.info("Generated %d safe zig-zag waypoints with 3-tier altitudes (75m/100m/125m)", len(waypoints))
+    log.info("Generated %d safe baseline waypoints with 3-tier altitudes (75m/100m/125m)", len(waypoints))
+
+    # Apply Closed-Zone Rerouting if requested
+    if args.closed_zone:
+        try:
+            cz_lat_str, cz_lon_str, cz_rad_str = args.closed_zone.split(",")
+            cz_lat, cz_lon, cz_radius_m = float(cz_lat_str), float(cz_lon_str), float(cz_rad_str)
+            waypoints, inv = reroute_around_closed_zone(waypoints, cz_lat, cz_lon, cz_radius_m, safe_buffer_m=80.0)
+            log.info("Closed Zone Active: %d waypoints pruned. Active route has %d waypoints avoiding zone.",
+                     len(inv), len(waypoints))
+        except Exception as err:
+            log.error("Error parsing --closed-zone parameter: %s", err)
+
+    # Mission States
+    STATE_PATROL = "PATROL"
+    STATE_INTERCEPT = "INTERCEPT"
+    STATE_SPIRAL = "SPIRAL"
+
+    mission_state = STATE_PATROL
+    target_vessel_pos: Optional[tuple[float, float]] = None
+    target_track_id: Optional[int] = None
+    spiral_waypoints: list[tuple[float, float, float, str]] = []
+    spiral_idx = 0
+    last_vessel_seen_time = 0.0
+
+    if args.intercept:
+        try:
+            it_lat_str, it_lon_str = args.intercept.split(",")
+            target_vessel_pos = (float(it_lat_str), float(it_lon_str))
+            mission_state = STATE_INTERCEPT
+            log.info("Starting in dynamic INTERCEPT mode to target (%.5f, %.5f)",
+                     target_vessel_pos[0], target_vessel_pos[1])
+        except Exception as err:
+            log.error("Error parsing --intercept parameter: %s", err)
+
+    # Live detector for real-time target confirmation
+    cam_intrinsics = cfg.assets["fixed-wing"].camera.intrinsics()
+    live_detector = VerifiedDetector(model_path="models/patch_verifier.pt",
+                                     min_color_score=0.25, min_verify_prob=0.50,
+                                     enable_temporal=True, min_hits=8, max_misses=4)
 
     # Prepare output directories
     stamp = _dt.datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
@@ -319,14 +375,12 @@ def main() -> int:
 
     # Step 1: Takeoff and transition to GUIDED
     if not args.no_fly:
-        if not plane.armed or plane.alt_rel < 30.0:
-            log.info("Fixed-wing is on ground. Initiating automated takeoff to %.1f m...", args.alt)
-            ok = plane.takeoff(alt=args.alt, timeout=120.0)
-            if not ok:
-                log.error("Takeoff failed or timed out. Aborting.")
-                fleet.shutdown()
+        if plane.alt_rel < 10.0:
+            log.info("Commanding fixed-wing takeoff to %dm...", int(args.alt))
+            if not plane.takeoff(alt=args.alt):
+                log.error("Fixed-wing takeoff command failed.")
                 return 1
-            log.info("Takeoff initiated. Climbing to transition altitude (>50m)...")
+            log.info("Takeoff initiated. Waiting to reach safe altitude (>50m)...")
             climb_deadline = time.monotonic() + 60.0
             while time.monotonic() < climb_deadline and plane.alt_rel < 50.0:
                 time.sleep(1.0)
@@ -334,7 +388,6 @@ def main() -> int:
             log.info("Fixed-wing already airborne at alt=%.1fm", plane.alt_rel)
 
         plane.set_airspeed(args.speed)
-        # Ensure plane is in GUIDED mode
         for _ in range(5):
             if plane.set_mode("GUIDED", timeout=3.0):
                 log.info("Plane successfully transitioned to GUIDED mode.")
@@ -352,13 +405,19 @@ def main() -> int:
     last_goto_time = 0.0
 
     try:
-        # Send first waypoint
-        if not args.no_fly and waypoints:
-            w_lat, w_lon, w_alt, w_name = waypoints[wpt_idx]
-            plane.goto(w_lat, w_lon, w_alt)
-            last_goto_time = time.monotonic()
-            log.info("Dispatched to Waypoint #%d [%s]: (%.5f, %.5f) at %.0fm",
-                     wpt_idx + 1, w_name, w_lat, w_lon, w_alt)
+        # Dispatch initial target
+        if not args.no_fly:
+            if mission_state == STATE_INTERCEPT and target_vessel_pos:
+                plane.goto(target_vessel_pos[0], target_vessel_pos[1], 75.0)
+                last_goto_time = time.monotonic()
+                log.info("Dispatched straight to INTERCEPT target: (%.5f, %.5f)",
+                         target_vessel_pos[0], target_vessel_pos[1])
+            elif waypoints:
+                w_lat, w_lon, w_alt, w_name = waypoints[wpt_idx]
+                plane.goto(w_lat, w_lon, w_alt)
+                last_goto_time = time.monotonic()
+                log.info("Dispatched to Waypoint #%d [%s]: (%.5f, %.5f) at %.0fm",
+                         wpt_idx + 1, w_name, w_lat, w_lon, w_alt)
 
         next_tick = time.monotonic()
 
@@ -384,6 +443,48 @@ def main() -> int:
             pose = fleet.pose_at("fixed-wing", frame.t_sim, clock="sim") or fleet.pose("fixed-wing")
             ship = gt.ship_pose() if gt else None
 
+            # 3. Live Detection & Dynamic Target Trigger
+            candidates = live_detector.detect(
+                frame.image,
+                frame_idx=frame_idx,
+                t_sim=frame.t_sim,
+                pose=pose,
+                cam_intrinsics=cam_intrinsics if pose else None,
+                georef=georef
+            )
+            confirmed_targets = [c for c in candidates if getattr(c, "is_confirmed", False)]
+
+            if confirmed_targets and pose:
+                best_c = confirmed_targets[0]
+                coords = pixel_to_latlon(best_c.cx, best_c.cy, pose, cam_intrinsics, georef)
+                if coords:
+                    v_lat, v_lon = coords
+                    target_vessel_pos = (v_lat, v_lon)
+                    target_track_id = getattr(best_c, "track_id", 1)
+                    last_vessel_seen_time = now
+
+                    # Post confirmed vessel track to competition API
+                    if track_client:
+                        res = track_client.post("Sierra One", v_lat, v_lon)
+                        if res:
+                            log.info("📡 Confirmed track posted to /api/tracks: (%.5f, %.5f)", v_lat, v_lon)
+
+                    if mission_state == STATE_PATROL:
+                        log.info("🎯 TARGET CONFIRMED! (Track #%d, %d hits). Breaking patrol to INTERCEPT at (%.5f, %.5f)...",
+                                 target_track_id, best_c.hits, v_lat, v_lon)
+                        mission_state = STATE_INTERCEPT
+                        if not args.no_fly:
+                            plane.goto(v_lat, v_lon, 75.0)
+                            last_goto_time = now
+                    elif mission_state == STATE_SPIRAL:
+                        log.info("🎯 TARGET RE-SIGHTED during spiral! Re-centering search at (%.5f, %.5f)...",
+                                 v_lat, v_lon)
+                        spiral_waypoints = generate_search_spiral(v_lat, v_lon, alt=75.0, r0=100.0, dr=130.0, r_max=650.0)
+                        spiral_idx = 0
+                        if not args.no_fly:
+                            plane.goto(spiral_waypoints[0][0], spiral_waypoints[0][1], 75.0)
+                            last_goto_time = now
+
             entry = {
                 "frame": os.path.relpath(img_path, run_dir),
                 "index": frame_idx,
@@ -391,7 +492,9 @@ def main() -> int:
                 "t_wall": frame.t_wall,
                 "width": frame.width,
                 "height": frame.height,
-                "camera": cfg.assets["fixed-wing"].camera.intrinsics(),
+                "camera": cam_intrinsics,
+                "mission_state": mission_state,
+                "target_track_id": target_track_id,
                 "pose": None if pose is None else {
                     "lat": pose.lat, "lon": pose.lon, "alt_rel": pose.alt_rel,
                     "alt_amsl": pose.alt_amsl, "roll": pose.roll,
@@ -414,34 +517,94 @@ def main() -> int:
             sidecar_file.flush()
             frame_idx += 1
 
-            # 3. Check waypoint progress
-            if not args.no_fly and pose and wpt_idx < len(waypoints):
-                w_lat, w_lon, w_alt, w_name = waypoints[wpt_idx]
-                dist_to_wpt = distance_m(pose.lat, pose.lon, w_lat, w_lon)
+            # 4. Dynamic Flight Control & State Machine Dispatch
+            if not args.no_fly and pose:
+                if mission_state == STATE_PATROL and wpt_idx < len(waypoints):
+                    w_lat, w_lon, w_alt, w_name = waypoints[wpt_idx]
+                    dist_to_wpt = distance_m(pose.lat, pose.lon, w_lat, w_lon)
 
-                # Periodic setpoint refresh and GUIDED enforcement (every 6 seconds)
-                if now - last_goto_time > 6.0:
-                    if plane.mode.upper() != "GUIDED":
-                        plane.set_mode("GUIDED", timeout=2.0)
-                    plane.goto(w_lat, w_lon, w_alt)
-                    last_goto_time = now
-
-                if frame_idx % int(args.hz * 5) == 0:
-                    log.info("Patrol status: Alt=%.1fm Spd=%.1fm/s Mode=%s | Wpt #%d [%s] dist=%.0fm | Frames=%d",
-                             pose.alt_rel, pose.speed, plane.mode, wpt_idx + 1, w_name, dist_to_wpt, frame_idx)
-
-                # If within 180m of waypoint, advance to next waypoint
-                if dist_to_wpt < 180.0:
-                    wpt_idx += 1
-                    if wpt_idx < len(waypoints):
-                        w_lat, w_lon, w_alt, w_name = waypoints[wpt_idx]
+                    # Periodic setpoint refresh and GUIDED enforcement (every 6 seconds)
+                    if now - last_goto_time > 6.0:
+                        if plane.mode.upper() != "GUIDED":
+                            plane.set_mode("GUIDED", timeout=2.0)
                         plane.goto(w_lat, w_lon, w_alt)
                         last_goto_time = now
-                        log.info("--> Reached! Advancing to Waypoint #%d [%s]: (%.5f, %.5f)",
-                                 wpt_idx + 1, w_name, w_lat, w_lon)
-                    else:
-                        log.info("All waypoints completed! Entering loiter...")
-                        break
+
+                    if frame_idx % int(args.hz * 5) == 0:
+                        log.info("[PATROL] Alt=%.1fm Spd=%.1fm/s Mode=%s | Wpt #%d [%s] dist=%.0fm | Frames=%d",
+                                 pose.alt_rel, pose.speed, plane.mode, wpt_idx + 1, w_name, dist_to_wpt, frame_idx)
+
+                    # Advance waypoint when within 180m
+                    if dist_to_wpt < 180.0:
+                        wpt_idx += 1
+                        if wpt_idx < len(waypoints):
+                            w_lat, w_lon, w_alt, w_name = waypoints[wpt_idx]
+                            plane.goto(w_lat, w_lon, w_alt)
+                            last_goto_time = now
+                            log.info("--> Reached! Advancing to Waypoint #%d [%s]: (%.5f, %.5f)",
+                                     wpt_idx + 1, w_name, w_lat, w_lon)
+                        else:
+                            if args.loop:
+                                log.info("Completed full patrol pass (%d waypoints)! Looping back to Waypoint #1 to continue patrol...",
+                                         len(waypoints))
+                                wpt_idx = 0
+                                w_lat, w_lon, w_alt, w_name = waypoints[wpt_idx]
+                                plane.goto(w_lat, w_lon, w_alt)
+                                last_goto_time = now
+                            else:
+                                log.info("All waypoints completed! Entering loiter...")
+                                break
+
+                elif mission_state == STATE_INTERCEPT and target_vessel_pos:
+                    dist_to_target = distance_m(pose.lat, pose.lon, target_vessel_pos[0], target_vessel_pos[1])
+                    if now - last_goto_time > 5.0:
+                        plane.goto(target_vessel_pos[0], target_vessel_pos[1], 75.0)
+                        last_goto_time = now
+
+                    if frame_idx % int(args.hz * 3) == 0:
+                        log.info("[INTERCEPT] Rushing to vessel Track #%s at (%.5f, %.5f) | dist=%.0fm",
+                                 target_track_id, target_vessel_pos[0], target_vessel_pos[1], dist_to_target)
+
+                    if dist_to_target < 160.0:
+                        log.info("📍 Arrived at intercept location (dist=%.0fm). Beginning expanding spiral search around (%.5f, %.5f)...",
+                                 dist_to_target, target_vessel_pos[0], target_vessel_pos[1])
+                        mission_state = STATE_SPIRAL
+                        spiral_waypoints = generate_search_spiral(target_vessel_pos[0], target_vessel_pos[1],
+                                                                  alt=75.0, r0=100.0, dr=130.0, r_max=650.0)
+                        spiral_idx = 0
+                        plane.goto(spiral_waypoints[0][0], spiral_waypoints[0][1], 75.0)
+                        last_goto_time = now
+
+                elif mission_state == STATE_SPIRAL:
+                    if spiral_idx < len(spiral_waypoints):
+                        sw_lat, sw_lon, sw_alt, sw_name = spiral_waypoints[spiral_idx]
+                        dist_to_sw = distance_m(pose.lat, pose.lon, sw_lat, sw_lon)
+
+                        if now - last_goto_time > 5.0:
+                            plane.goto(sw_lat, sw_lon, sw_alt)
+                            last_goto_time = now
+
+                        if frame_idx % int(args.hz * 3) == 0:
+                            log.info("[SPIRAL] %s (Wpt %d/%d) | dist=%.0fm",
+                                     sw_name, spiral_idx + 1, len(spiral_waypoints), dist_to_sw)
+
+                        if dist_to_sw < 150.0:
+                            spiral_idx += 1
+                            if spiral_idx < len(spiral_waypoints):
+                                sw_lat, sw_lon, sw_alt, sw_name = spiral_waypoints[spiral_idx]
+                                plane.goto(sw_lat, sw_lon, sw_alt)
+                                last_goto_time = now
+                                log.info("--> Advancing spiral search: %s", sw_name)
+                            else:
+                                log.info("Completed full search spiral (r_max reached). No target seen for %.0fs. Resuming baseline patrol...",
+                                         now - last_vessel_seen_time)
+                                # Find closest remaining strait waypoint
+                                closest_wpt = min(range(len(waypoints)),
+                                                  key=lambda i: distance_m(pose.lat, pose.lon, waypoints[i][0], waypoints[i][1]))
+                                wpt_idx = closest_wpt
+                                mission_state = STATE_PATROL
+                                plane.goto(waypoints[wpt_idx][0], waypoints[wpt_idx][1], waypoints[wpt_idx][2])
+                                last_goto_time = now
 
     except KeyboardInterrupt:
         log.info("Patrol interrupted by user.")

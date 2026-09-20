@@ -36,7 +36,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from arcticlib.config import load_config
-from arcticlib.geo import distance_m
+from arcticlib.geo import (
+    distance_m,
+    generate_search_spiral,
+    reroute_around_closed_zone,
+)
 from tools.patrol_and_record import generate_safe_strait_waypoints
 
 
@@ -83,8 +87,26 @@ def main() -> int:
     top_lat, left_lon = num2deg(x_min, y_min, zoom)
     bot_lat, right_lon = num2deg(x_max + 1, y_max + 1, zoom)
 
-    waypoints = generate_safe_strait_waypoints(step_lon=args.spacing, safe_margin_m=args.margin)
-    print(f"Loaded {len(waypoints)} safe waypoints.")
+    base_waypoints = generate_safe_strait_waypoints(step_lon=args.spacing, safe_margin_m=args.margin)
+    print(f"Loaded {len(base_waypoints)} safe baseline waypoints.")
+
+    # Apply Closed-Zone Rerouting if requested
+    cz_lat, cz_lon, cz_radius_m = None, None, None
+    invalidated_indices = []
+    if args.closed_zone:
+        try:
+            cz_lat_str, cz_lon_str, cz_rad_str = args.closed_zone.split(",")
+            cz_lat, cz_lon, cz_radius_m = float(cz_lat_str), float(cz_lon_str), float(cz_rad_str)
+            active_waypoints, invalidated_indices = reroute_around_closed_zone(
+                base_waypoints, cz_lat, cz_lon, cz_radius_m, safe_buffer_m=80.0
+            )
+            print(f"Closed Zone: {len(invalidated_indices)} waypoints pruned. "
+                  f"Active path rerouted to {len(active_waypoints)} waypoints avoiding exclusion zone.")
+        except Exception as err:
+            print(f"Error parsing --closed-zone parameter: {err}")
+            active_waypoints = base_waypoints
+    else:
+        active_waypoints = base_waypoints
 
     fig, ax = plt.subplots(figsize=(16, 11), dpi=160)
     ax.imshow(mosaic_rgb, extent=[left_lon, right_lon, bot_lat, top_lat])
@@ -102,20 +124,23 @@ def main() -> int:
     isl_lon_min, isl_lon_max = -94.855, -94.830
     ax.axvspan(isl_lon_min, isl_lon_max, color="cyan", alpha=0.15, label="Island & Stream Zone (Fly 125m)")
 
-    # Draw Flight Path
-    w_lats = [w[0] for w in waypoints]
-    w_lons = [w[1] for w in waypoints]
+    # Draw Active Flight Path
+    w_lats = [w[0] for w in active_waypoints]
+    w_lons = [w[1] for w in active_waypoints]
 
     full_lats = [plane_start[0]] + w_lats
     full_lons = [plane_start[1]] + w_lons
-    ax.plot(full_lons, full_lats, color="white", linestyle="--", linewidth=1.6, alpha=0.85, label="Flight Route")
+    route_label = "Rerouted Flight Route (Avoids Closed Zone)" if args.closed_zone else "Flight Route"
+    ax.plot(full_lons, full_lats, color="white", linestyle="--", linewidth=1.8, alpha=0.9, label=route_label, zorder=4)
 
-    # Group waypoints by altitude tier
+    # Group active waypoints by altitude tier
     wp_75_lat, wp_75_lon = [], []
     wp_100_lat, wp_100_lon = [], []
     wp_125_lat, wp_125_lon = [], []
 
-    for idx, (wlat, wlon, walt, wname) in enumerate(waypoints):
+    for idx, (wlat, wlon, walt, wname) in enumerate(active_waypoints):
+        if "Detour" in wname:
+            continue
         if walt <= 80.0:
             wp_75_lat.append(wlat)
             wp_75_lon.append(wlon)
@@ -134,10 +159,21 @@ def main() -> int:
     if wp_125_lon:
         ax.scatter(wp_125_lon, wp_125_lat, c="#FF00FF", s=85, edgecolors="white", linewidths=1.5, zorder=5, label="Island & Stream (125m alt)")
 
+    # Plot Detour Waypoints if present
+    detour_pts = [w for w in active_waypoints if "Detour" in w[3]]
+    if detour_pts:
+        d_lons = [w[1] for w in detour_pts]
+        d_lats = [w[0] for w in detour_pts]
+        ax.scatter(d_lons, d_lats, c="#00FFFF", marker="D", s=90, edgecolors="black", linewidths=1.5, zorder=7, label="Bypass Detour Waypoint")
+        for dw in detour_pts:
+            ax.annotate("DETOUR", (dw[1], dw[0]), textcoords="offset points", xytext=(6, 6),
+                        color="#00FFFF", fontsize=8, fontweight="bold",
+                        bbox=dict(boxstyle="round,pad=0.2", fc="black", ec="#00FFFF", alpha=0.8), zorder=8)
+
     # Annotate representative waypoints
-    for idx, (wlat, wlon, walt, wname) in enumerate(waypoints):
+    for idx, (wlat, wlon, walt, wname) in enumerate(active_waypoints):
         num = idx + 1
-        if num in [1, 2, 3, 10, 11, 12, 19, 20, 21, 22, 23, 24, 35, 36, 45, 50, len(waypoints)]:
+        if "Detour" not in wname and num in [1, 2, 3, 10, 11, 12, 19, 20, 21, 22, 23, 24, 35, 36, 45, 50, len(active_waypoints)]:
             col_txt = "#00FF66" if walt <= 80.0 else ("#FFDD00" if walt <= 110.0 else "#FF00FF")
             ax.annotate(f"#{num} ({walt:.0f}m)", (wlon, wlat), textcoords="offset points", xytext=(4, 4),
                         color="white", fontsize=7.5, fontweight="bold",
@@ -159,37 +195,26 @@ def main() -> int:
     # --- TACTICAL EDGE CASE OVERLAYS ---
 
     # Edge Case 1: Closed-off / Restricted Exclusion Zone
-    cz_lat, cz_lon, cz_radius_m = None, None, None
-    if args.closed_zone:
-        try:
-            cz_lat_str, cz_lon_str, cz_rad_str = args.closed_zone.split(",")
-            cz_lat, cz_lon, cz_radius_m = float(cz_lat_str), float(cz_lon_str), float(cz_rad_str)
+    if cz_lat is not None and cz_lon is not None and cz_radius_m is not None:
+        deg_radius_lat = cz_radius_m / 111000.0
+        deg_radius_lon = cz_radius_m / (111000.0 * math.cos(math.radians(cz_lat)))
 
-            # Approximate meters to degrees for map rendering
-            deg_radius_lat = cz_radius_m / 111000.0
-            deg_radius_lon = cz_radius_m / (111000.0 * math.cos(math.radians(cz_lat)))
+        circle = patches.Ellipse(
+            (cz_lon, cz_lat), width=2 * deg_radius_lon, height=2 * deg_radius_lat,
+            color="red", alpha=0.35, zorder=6, label=f"Closed Zone ({cz_radius_m:.0f}m)"
+        )
+        ax.add_patch(circle)
+        ax.plot(cz_lon, cz_lat, "rx", markersize=14, markeredgewidth=2.5, zorder=7)
 
-            circle = patches.Ellipse(
-                (cz_lon, cz_lat), width=2 * deg_radius_lon, height=2 * deg_radius_lat,
-                color="red", alpha=0.35, zorder=6, label=f"Closed Zone ({cz_radius_m:.0f}m)"
-            )
-            ax.add_patch(circle)
-            ax.plot(cz_lon, cz_lat, "rx", markersize=14, markeredgewidth=2.5, zorder=7)
+        # Plot invalidated waypoints in faded red
+        for inv_i in invalidated_indices:
+            inv_wp = base_waypoints[inv_i]
+            ax.plot(inv_wp[1], inv_wp[0], "ro", markersize=8, markeredgecolor="white", alpha=0.7, zorder=6)
+            ax.annotate(f"#[CLOSED]", (inv_wp[1], inv_wp[0]), textcoords="offset points", xytext=(-15, -15),
+                        color="red", fontsize=8, fontweight="bold",
+                        bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="red", alpha=0.85), zorder=7)
 
-            # Highlight invalidated waypoints inside exclusion zone in red
-            closed_count = 0
-            for idx, (wlat, wlon, _, name) in enumerate(waypoints):
-                if distance_m(wlat, wlon, cz_lat, cz_lon) <= cz_radius_m:
-                    closed_count += 1
-                    ax.plot(wlon, wlat, "ro", markersize=10, markeredgecolor="white", zorder=8)
-                    ax.annotate(f"#[CLOSED]", (wlon, wlat), textcoords="offset points", xytext=(-15, -15),
-                                color="red", fontsize=8, fontweight="bold",
-                                bbox=dict(boxstyle="round,pad=0.2", fc="white", alpha=0.85), zorder=9)
-            print(f"Closed Zone: {closed_count} waypoints invalidated within {cz_radius_m:.0f}m radius.")
-        except Exception as err:
-            print(f"Error parsing --closed-zone parameter: {err}")
-
-    # Edge Case 2: Dynamic Intercept Target
+    # Edge Case 2: Dynamic Intercept Target & Expanding Search Spiral
     if args.intercept:
         try:
             it_lat_str, it_lon_str = args.intercept.split(",")
@@ -200,9 +225,17 @@ def main() -> int:
                         color="magenta", fontsize=10, fontweight="bold",
                         bbox=dict(boxstyle="round,pad=0.3", fc="black", ec="magenta", alpha=0.85), zorder=11)
 
-            # Dynamic detour line from aircraft start to intercept point
-            ax.plot([plane_start[1], it_lon], [plane_start[0], it_lat], color="magenta", linestyle=":", linewidth=2.5, zorder=9)
-            print(f"Dynamic Intercept: Target plotted at ({it_lat:.5f}, {it_lon:.5f}).")
+            # Dynamic transit line from aircraft start to intercept point
+            ax.plot([plane_start[1], it_lon], [plane_start[0], it_lat], color="magenta", linestyle=":", linewidth=2.5, zorder=9, label="Transit to Target")
+
+            # Generate and draw expanding Archimedean search spiral around target
+            spiral_wps = generate_search_spiral(it_lat, it_lon, alt=75.0, r0=100.0, dr=130.0, r_max=650.0)
+            sp_lats = [it_lat] + [w[0] for w in spiral_wps]
+            sp_lons = [it_lon] + [w[1] for w in spiral_wps]
+            ax.plot(sp_lons, sp_lats, color="#FF00AA", linestyle="-", linewidth=2.0, alpha=0.85, zorder=10, label="Expanding Search Spiral (100m-650m)")
+            ax.scatter([w[1] for w in spiral_wps], [w[0] for w in spiral_wps], c="#FF00AA", s=25, edgecolors="white", linewidths=0.8, zorder=11)
+
+            print(f"Dynamic Intercept: Target at ({it_lat:.5f}, {it_lon:.5f}) with {len(spiral_wps)} spiral search waypoints (r=100m..650m).")
         except Exception as err:
             print(f"Error parsing --intercept parameter: {err}")
 
