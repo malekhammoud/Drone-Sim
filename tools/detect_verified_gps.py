@@ -45,7 +45,7 @@ import numpy as np
 from arcticlib.geo import distance_m
 from arcticlib.geolocate import (GeoConfig, intrinsics_from_fov, project_to_pixel,
                                  refine_tracks)
-from tools.detect_color import Candidate, ColorAnomalyDetector
+from tools.detect_color import Candidate
 from tools.detect_verified import VerifiedDetector
 
 log = logging.getLogger("detect_verified_gps")
