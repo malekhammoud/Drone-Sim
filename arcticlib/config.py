@@ -9,8 +9,8 @@ Everything is overridable, in increasing priority:
 Priority order matters: env wins over the file, which wins over defaults, so a
 teammate can override one port for a one-off run without editing anything.
 
-The defaults describe the cloud sim as reached over WireGuard. For a local
-``docker compose`` deployment run with ``ARCTICSIM_HOST=localhost``.
+The defaults target a **local** ``docker compose`` deployment (``127.0.0.1``).
+Set ``ARCTICSIM_HOST`` to point at a remote sim instead.
 """
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ import os
 from dataclasses import dataclass, field, replace
 from typing import Optional
 
-DEFAULT_HOST = "10.99.1.1"
+DEFAULT_HOST = "127.0.0.1"
 
 # Host-published ports on the sim machine (RECON.md §4). Reach each asset at
 # ``udpout:<host>:<port>``.

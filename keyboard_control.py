@@ -232,7 +232,7 @@ class DroneController:
         self.mav.target_component = hb.get_srcComponent()
 
         # Only ask for the streams we actually use; the link may be a slow
-        # radio/WireGuard path and the default firehose is a lot of traffic.
+        # radio/network path and the default firehose is a lot of traffic.
         for stream, rate in (
             (M.MAV_DATA_STREAM_POSITION, 5),
             (M.MAV_DATA_STREAM_EXTRA1, 10),   # ATTITUDE
@@ -286,33 +286,54 @@ class DroneController:
             time.sleep(0.1)
         return False
 
-    def takeoff(self, altitude: float = 15.0, timeout: float = 60.0) -> bool:
-        """Arm if needed and climb to `altitude` in GUIDED mode."""
+    def takeoff(self, altitude: float = 15.0, timeout: float = 120.0) -> bool:
+        """Arm if needed and climb to `altitude` in GUIDED mode.
+
+        Straight after a sim reset the EKF needs ~1-2 min to settle. During that
+        window the autopilot accepts `arm` and `NAV_TAKEOFF` but holds the motors
+        at idle and then auto-disarms ("Disarming motors" ~10 s after arming), so
+        a single attempt looks like a rejected takeoff — the aircraft appears
+        stuck on the ground. Loop instead: if it disarms without climbing, re-arm
+        and re-command until `timeout` is spent.
+        """
         if self.armed and self.alt > 2.0:
             print("Already flying; ignoring takeoff.")
             return True
-        if not self.ensure_guided():
-            print(f"Takeoff aborted: could not enter GUIDED (mode {self.mode}).")
-            return False
-        print("Arming ...")
-        if not self.arm():
-            print("Takeoff aborted: arming failed (pre-arm checks?).")
-            return False
-        print(f"Taking off to {altitude:.0f} m ...")
-        self.mav.mav.command_long_send(
-            self.mav.target_system, self.mav.target_component,
-            M.MAV_CMD_NAV_TAKEOFF, 0,
-            0, 0, 0, 0, 0, 0, altitude,
-        )
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            self.send_heartbeat()
-            self.poll_telemetry()
+            if not self.ensure_guided():
+                print(f"GUIDED unavailable (mode {self.mode}); retrying ...")
+                time.sleep(1.0)
+                continue
+            if not self.armed:
+                print("Arming ...")
+                remaining = max(1.0, deadline - time.monotonic())
+                if not self.arm(timeout=min(20.0, remaining)):
+                    time.sleep(1.0)
+                    continue
+            print(f"Taking off to {altitude:.0f} m ...")
+            self.mav.mav.command_long_send(
+                self.mav.target_system, self.mav.target_component,
+                M.MAV_CMD_NAV_TAKEOFF, 0,
+                0, 0, 0, 0, 0, 0, altitude,
+            )
+            climb_until = min(deadline, time.monotonic() + 30.0)
+            while time.monotonic() < climb_until:
+                self.send_heartbeat()
+                self.poll_telemetry()
+                if self.alt >= altitude - 1.5:
+                    print(f"Reached {self.alt:.1f} m.")
+                    return True
+                if not self.armed:
+                    print("Auto-disarmed before climbing; retrying "
+                          "(EKF still settling?).")
+                    break
+                time.sleep(0.1)
             if self.alt >= altitude - 1.5:
                 print(f"Reached {self.alt:.1f} m.")
                 return True
-            time.sleep(0.1)
-        print(f"Takeoff timed out at {self.alt:.1f} m.")
+        print(f"Takeoff failed after {timeout:.0f} s at {self.alt:.1f} m "
+              f"(mode {self.mode}, armed={self.armed}).")
         return False
 
     def land(self, timeout: float = 120.0) -> bool:
@@ -549,7 +570,7 @@ def self_test(ctrl: DroneController, seconds: float = 3.0,
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--master", default="udpout:10.99.1.1:14550",
+    ap.add_argument("--master", default="udpout:127.0.0.1:14550",
                     help="MAVLink connection string")
     ap.add_argument("--max-speed", type=float, default=3.0,
                     help="max horizontal speed, m/s (default 3)")

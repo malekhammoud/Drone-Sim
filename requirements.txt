@@ -13,3 +13,9 @@ requests
 opencv-python-headless
 # Optional: only needed to load config.yaml instead of env vars.
 PyYAML
+
+# Detection/training tools (tools/detect_verified.py, tools/train_patch_verifier.py,
+# tools/plot_patrol_plan.py, algorithm.py).
+matplotlib
+scipy
+torch

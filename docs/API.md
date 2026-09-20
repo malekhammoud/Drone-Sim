@@ -33,7 +33,7 @@ variables. Also builds the asset roster.
 
 | Variable | Meaning | Default |
 |---|---|---|
-| `ARCTICSIM_HOST` | sim host | `10.99.1.1` |
+| `ARCTICSIM_HOST` | sim host | `127.0.0.1` |
 | `ARCTICSIM_CONTROL_PORT` | control API | `8090` |
 | `ARCTICSIM_TRACKS_PORT` | track API | `8010` |
 | `ARCTICSIM_GZWEB_PORT` | gzweb HTTP/WS | `8080` |
@@ -69,7 +69,7 @@ Methods: `asset(name) -> AssetSpec` (raises `KeyError`), `url(port) -> str`.
 ### `AssetSpec`
 
 `name, kind, sysid, host, port, camera`. `kind` is `copter | plane | tower | rover`.
-Property `master -> str` gives the pymavlink string, e.g. `udpout:10.99.1.1:14550`.
+Property `master -> str` gives the pymavlink string, e.g. `udpout:127.0.0.1:14550`.
 
 ### `CameraSpec`
 

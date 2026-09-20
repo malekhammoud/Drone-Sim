@@ -12,7 +12,7 @@ Checks, each PASS/FAIL independently:
   7. a test track is posted and appears in the list
 
 Usage:
-    python tools/smoke_test.py [--host 10.99.1.1] [--no-fly] [--outdir smoke_frames]
+    python tools/smoke_test.py [--host 127.0.0.1] [--no-fly] [--outdir smoke_frames]
 """
 from __future__ import annotations
 

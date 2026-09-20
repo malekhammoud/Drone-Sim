@@ -82,7 +82,7 @@ Full detail in [`../RECON.md`](../RECON.md).
 
 | Thing | Value |
 |---|---|
-| Sim host (WireGuard) | `10.99.1.1` (we are `10.99.1.4`) |
+| Sim host (local) | `127.0.0.1` (`ARCTICSIM_HOST`) |
 | Endpoints | quad `:14550`, plane `:14560`, tower-1 `:14580`, tower-2 `:14590` |
 | Sysids | quad 1, plane 2, tower-1 4, tower-2 5 |
 | Cameras | `:8600` quad, `:8610` plane, `:8630`/`:8640` towers (`/snapshot.jpg`, `/stream`) |
@@ -101,9 +101,9 @@ Three quirks that bite everyone:
 
 ## Troubleshooting
 
-**No heartbeat / `14550` silent.** Check `curl http://10.99.1.1:8090/api/status`.
+**No heartbeat / `14550` silent.** Check `curl http://127.0.0.1:8090/api/status`.
 If `state` is `idle` and the asset shows `"mavlink": false`, the sim is stopped —
-that is not a WireGuard problem. Reset the sim (`POST /api/reset`, or the UI) and
+that is not a network problem. Reset the sim (`POST /api/reset`, or the UI) and
 wait for `/api/assets` to show `mavlink: true`. See `SimClient`.
 
 **Vehicle connects but will not arm / take off.** Straight after a Reset the EKF

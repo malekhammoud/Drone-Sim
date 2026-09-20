@@ -3,7 +3,7 @@
 # Simple smoke test for MAVProxy.
 #
 # Runs the same command you would use manually:
-#   mavproxy.py --master=udpout:10.99.1.1:14550
+#   mavproxy.py --master=udpout:127.0.0.1:14550
 # then feeds it "exit" so it does not hang forever.
 #
 # Usage:
@@ -11,7 +11,7 @@
 
 set -u
 
-MASTER="${MASTER:-udpout:10.99.1.1:14550}"
+MASTER="${MASTER:-udpout:127.0.0.1:14550}"
 RUN_SECONDS="${RUN_SECONDS:-15}"
 
 cd "$(dirname "$0")" || exit 1

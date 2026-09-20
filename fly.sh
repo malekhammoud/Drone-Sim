@@ -2,7 +2,7 @@
 # Launch the keyboard flight controller inside the project venv.
 #
 #   ./fly.sh
-#   ./fly.sh --master=udpout:10.99.1.1:14550 --max-speed=2
+#   ./fly.sh --master=udpout:127.0.0.1:14550 --max-speed=2
 #   ./fly.sh --self-test
 #
 set -euo pipefail
