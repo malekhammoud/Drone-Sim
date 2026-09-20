@@ -2,10 +2,13 @@
 """Plot the Fixed-Wing Hot-Dog Lawnmower Patrol Plan over real satellite terrain.
 
 Fetches satellite imagery of Bellot Strait / Fort Ross, plots the planned hot-dog
-waypoints, starting positions of all assets, and any previously observed ship tracks.
+waypoints, starting positions of all assets, previously observed ship tracks,
+and optional edge-case overlays (dynamic intercept points, closed zones, modified paths).
 
 Usage:
     python tools/plot_patrol_plan.py --out patrol_plan.png
+    python tools/plot_patrol_plan.py --closed-zone 71.995,-94.810,800
+    python tools/plot_patrol_plan.py --intercept 71.985,-94.750
 """
 from __future__ import annotations
 
@@ -21,11 +24,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import cv2
 import matplotlib
 matplotlib.use("Agg")
+import matplotlib.patches as patches
 import matplotlib.pyplot as plt
 import numpy as np
 
 from arcticlib.config import load_config
-from arcticlib.geo import Georef, destination
+from arcticlib.geo import Georef, destination, distance_m
 from tools.patrol_and_record import generate_hotdog_waypoints
 
 
@@ -82,6 +86,11 @@ def main() -> int:
     parser.add_argument("--out", default="patrol_plan.png", help="Output plot filename")
     parser.add_argument("--sidecar", default="patrol_run/2026-09-19T16-22-21/sidecar.jsonl",
                         help="Optional sidecar with observed ship positions")
+    # Edge Case Arguments
+    parser.add_argument("--closed-zone", type=str, default=None,
+                        help="Closed zone overlay formatted as 'lat,lon,radius_m' (e.g., '71.995,-94.810,800')")
+    parser.add_argument("--intercept", type=str, default=None,
+                        help="Dynamic intercept coordinate target as 'lat,lon' (e.g., '71.985,-94.750')")
     args = parser.parse_args()
 
     cfg = load_config()
@@ -106,7 +115,7 @@ def main() -> int:
     ax.plot(t2[1], t2[0], "m^", markersize=12, label="Tower 2 (NE)", markeredgecolor="white", markeredgewidth=1.5)
     ax.plot(plane_start[1], plane_start[0], "go", markersize=12, label="Plane Start (Middle)", markeredgecolor="white", markeredgewidth=2.0)
 
-    # Flight path
+    # Standard Flight Path
     w_lats = [w[0] for w in waypoints]
     w_lons = [w[1] for w in waypoints]
     full_lats = [plane_start[0]] + w_lats
@@ -114,6 +123,7 @@ def main() -> int:
 
     ax.plot(full_lons, full_lats, color="yellow", linestyle="--", linewidth=2.2, alpha=0.95, label="Hot-Dog Flight Path")
 
+    # Plot Base Waypoints
     for idx, (wlat, wlon, _, name) in enumerate(waypoints):
         ax.plot(wlon, wlat, "yo", markersize=8, markeredgecolor="black")
         ax.annotate(f"#{idx+1} {name}", (wlon, wlat), textcoords="offset points", xytext=(5, 5),
@@ -133,7 +143,52 @@ def main() -> int:
             ax.plot(s_lons, s_lats, color="cyan", linewidth=3.0, label="Observed Ship Track")
             ax.plot(s_lons[-1], s_lats[-1], "cs", markersize=10, label="Ship Current Area")
 
-    ax.set_title("Fixed-Wing 'Hot-Dog' Patrol Plan (Bellot Strait)", fontsize=14, fontweight="bold")
+    # --- EDGE CASE OVERLAYS ---
+    
+    # Edge Case 1: Closed-off / Restricted Exclusion Zone
+    if args.closed_zone:
+        try:
+            cz_lat_str, cz_lon_str, cz_rad_str = args.closed_zone.split(",")
+            cz_lat, cz_lon, cz_radius_m = float(cz_lat_str), float(cz_lon_str), float(cz_rad_str)
+            
+            # Approximate meters to degrees for map rendering
+            deg_radius_lat = cz_radius_m / 111000.0
+            deg_radius_lon = cz_radius_m / (111000.0 * math.cos(math.radians(cz_lat)))
+
+            circle = patches.Ellipse(
+                (cz_lon, cz_lat), width=2 * deg_radius_lon, height=2 * deg_radius_lat,
+                color="red", alpha=0.35, label=f"Closed Zone ({cz_radius_m:.0f}m)"
+            )
+            ax.add_patch(circle)
+            ax.plot(cz_lon, cz_lat, "rx", markersize=12, markeredgewidth=2)
+            
+            # Highlight invalidated waypoints in red
+            for idx, (wlat, wlon, _, name) in enumerate(waypoints):
+                if distance_m(wlat, wlon, cz_lat, cz_lon) <= cz_radius_m:
+                    ax.plot(wlon, wlat, "ro", markersize=10, markeredgecolor="white")
+                    ax.annotate(f"#[CLOSED]", (wlon, wlat), textcoords="offset points", xytext=(-15, -15),
+                                color="red", fontsize=8, fontweight="bold",
+                                bbox=dict(boxstyle="round,pad=0.2", fc="white", alpha=0.8))
+        except Exception as err:
+            print(f"Error parsing --closed-zone parameter: {err}")
+
+    # Edge Case 2: Dynamic Intercept Target
+    if args.intercept:
+        try:
+            it_lat_str, it_lon_str = args.intercept.split(",")
+            it_lat, it_lon = float(it_lat_str), float(it_lon_str)
+            
+            ax.plot(it_lon, it_lat, "m*", markersize=16, label="Tether Intercept Target", markeredgecolor="white")
+            ax.annotate("EMERGENCY TARGET", (it_lon, it_lat), textcoords="offset points", xytext=(10, -10),
+                        color="magenta", fontsize=10, fontweight="bold",
+                        bbox=dict(boxstyle="round,pad=0.3", fc="black", alpha=0.85))
+            
+            # Plot dynamic detour line from aircraft start to intercept point
+            ax.plot([plane_start[1], it_lon], [plane_start[0], it_lat], color="magenta", linestyle=":", linewidth=2.5)
+        except Exception as err:
+            print(f"Error parsing --intercept parameter: {err}")
+
+    ax.set_title("Fixed-Wing Patrol Plan with Tactical Edge-Cases (Bellot Strait)", fontsize=14, fontweight="bold")
     ax.set_xlabel("Longitude", fontsize=11)
     ax.set_ylabel("Latitude", fontsize=11)
     ax.set_xlim([left_lon, right_lon])

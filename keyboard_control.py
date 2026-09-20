@@ -219,7 +219,7 @@ class DroneController:
         )
         self._t0 = time.monotonic()
 
-    # -- connection -------------------------------------------------------
+    # -- connection ---------------------------------------------------------------
     def connect(self, timeout: float = 20.0) -> None:
         deadline = time.monotonic() + timeout
         hb = None
